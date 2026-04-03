@@ -1,6 +1,7 @@
 use std::process::{Command, Output};
 use std::io;
 use std::collections::HashMap;
+use std::path::Path;
 use crate::utils::platform;
 use crate::utils::file;
 use log::{info, debug, warn};
@@ -16,80 +17,163 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// GUI 应用启动时可能没有继承用户 shell 的 PATH，需要手动添加常见路径
 pub fn get_extended_path() -> String {
     let mut paths = Vec::new();
-    
-    // 添加常见的可执行文件路径
-    paths.push("/opt/homebrew/bin".to_string());  // Homebrew on Apple Silicon
-    paths.push("/usr/local/bin".to_string());      // Homebrew on Intel / 常规安装
-    paths.push("/usr/bin".to_string());
-    paths.push("/bin".to_string());
-    
-    if let Some(home) = dirs::home_dir() {
-        let home_str = home.display().to_string();
-        
-        // nvm 路径（尝试获取当前版本）
-        let nvm_default = format!("{}/.nvm/alias/default", home_str);
-        if let Ok(version) = std::fs::read_to_string(&nvm_default) {
-            let version = version.trim();
-            if !version.is_empty() {
-                paths.insert(0, format!("{}/.nvm/versions/node/v{}/bin", home_str, version));
-            }
-        }
-        // 动态扫描 nvm 已安装版本目录，避免 PATH 只覆盖写死版本
-        let nvm_versions_dir = std::path::Path::new(&home).join(".nvm/versions/node");
-        if let Ok(entries) = std::fs::read_dir(&nvm_versions_dir) {
-            let mut bins = Vec::new();
-            for entry in entries.flatten() {
-                let nvm_bin = entry.path().join("bin");
-                if nvm_bin.exists() {
-                    bins.push(nvm_bin.display().to_string());
-                }
-            }
-            bins.sort();
-            bins.reverse();
-            for bin in bins {
-                paths.push(bin);
-            }
+
+    if platform::is_windows() {
+        if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+            push_unique_path(&mut paths, nvm_symlink);
         }
 
-        // 也添加常见 nvm 版本路径作为兜底
-        for version in ["v22.22.0", "v22.12.0", "v22.11.0", "v22.0.0", "v23.0.0"] {
-            paths.push(format!("{}/.nvm/versions/node/{}/bin", home_str, version));
+        if let Ok(program_files) = std::env::var("ProgramFiles") {
+            push_unique_path(&mut paths, format!("{}\\nodejs", program_files));
         }
-        
-        // fnm
-        paths.push(format!("{}/.fnm/aliases/default/bin", home_str));
-        
-        // volta
-        paths.push(format!("{}/.volta/bin", home_str));
-        
-        // asdf
-        paths.push(format!("{}/.asdf/shims", home_str));
-        
-        // mise
-        paths.push(format!("{}/.local/share/mise/shims", home_str));
+        if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+            push_unique_path(&mut paths, format!("{}\\nodejs", program_files_x86));
+        }
+
+        push_unique_path(&mut paths, "C:\\Program Files\\nodejs".to_string());
+        push_unique_path(&mut paths, "C:\\Program Files (x86)\\nodejs".to_string());
+        push_unique_path(&mut paths, "C:\\nvm4w\\nodejs".to_string());
+        push_unique_path(&mut paths, "C:\\ProgramData\\chocolatey\\lib\\nodejs\\tools".to_string());
+
+        if let Some(home) = dirs::home_dir() {
+            let home_str = home.display().to_string();
+            push_unique_path(&mut paths, format!("{}\\AppData\\Roaming\\npm", home_str));
+            push_unique_path(&mut paths, format!("{}\\AppData\\Local\\Volta\\bin", home_str));
+            push_unique_path(&mut paths, format!("{}\\AppData\\Roaming\\fnm", home_str));
+            push_unique_path(&mut paths, format!("{}\\AppData\\Local\\fnm\\aliases\\default", home_str));
+            push_unique_path(&mut paths, format!("{}\\AppData\\Roaming\\nvm\\current", home_str));
+            push_unique_path(&mut paths, format!("{}\\.fnm\\aliases\\default", home_str));
+            push_unique_path(&mut paths, format!("{}\\scoop\\shims", home_str));
+            push_unique_path(&mut paths, format!("{}\\scoop\\apps\\nodejs\\current", home_str));
+            push_unique_path(&mut paths, format!("{}\\scoop\\apps\\nodejs-lts\\current", home_str));
+            push_unique_path(&mut paths, format!("{}\\AppData\\Local\\Programs\\nodejs", home_str));
+        }
+
+        if let Ok(npm_prefix) = std::env::var("NPM_CONFIG_PREFIX") {
+            push_unique_path(&mut paths, npm_prefix);
+        }
+    } else {
+        // 添加常见的可执行文件路径
+        push_unique_path(&mut paths, "/opt/homebrew/bin".to_string());  // Homebrew on Apple Silicon
+        push_unique_path(&mut paths, "/usr/local/bin".to_string());      // Homebrew on Intel / 常规安装
+        push_unique_path(&mut paths, "/usr/bin".to_string());
+        push_unique_path(&mut paths, "/bin".to_string());
+
+        if let Some(home) = dirs::home_dir() {
+            let home_str = home.display().to_string();
+
+            // nvm 路径（尝试获取当前版本）
+            let nvm_default = format!("{}/.nvm/alias/default", home_str);
+            if let Ok(version) = std::fs::read_to_string(&nvm_default) {
+                let version = version.trim();
+                if !version.is_empty() {
+                    let normalized = if version.starts_with('v') {
+                        version.to_string()
+                    } else {
+                        format!("v{}", version)
+                    };
+                    push_unique_path(&mut paths, format!("{}/.nvm/versions/node/{}/bin", home_str, normalized));
+                }
+            }
+
+            // 动态扫描 nvm 已安装版本目录，避免 PATH 只覆盖写死版本
+            let nvm_versions_dir = std::path::Path::new(&home).join(".nvm/versions/node");
+            if let Ok(entries) = std::fs::read_dir(&nvm_versions_dir) {
+                let mut bins = Vec::new();
+                for entry in entries.flatten() {
+                    let nvm_bin = entry.path().join("bin");
+                    if nvm_bin.exists() {
+                        bins.push(nvm_bin.display().to_string());
+                    }
+                }
+                bins.sort();
+                bins.reverse();
+                for bin in bins {
+                    push_unique_path(&mut paths, bin);
+                }
+            }
+
+            // 也添加常见 nvm 版本路径作为兜底
+            for version in ["v22.22.0", "v22.12.0", "v22.11.0", "v22.0.0", "v23.0.0"] {
+                push_unique_path(&mut paths, format!("{}/.nvm/versions/node/{}/bin", home_str, version));
+            }
+
+            // fnm
+            push_unique_path(&mut paths, format!("{}/.fnm/aliases/default/bin", home_str));
+
+            // volta
+            push_unique_path(&mut paths, format!("{}/.volta/bin", home_str));
+
+            // asdf
+            push_unique_path(&mut paths, format!("{}/.asdf/shims", home_str));
+
+            // mise
+            push_unique_path(&mut paths, format!("{}/.local/share/mise/shims", home_str));
+        }
     }
-    
+
     // 获取当前 PATH 并合并
     let current_path = std::env::var("PATH").unwrap_or_default();
-    if !current_path.is_empty() {
-        paths.push(current_path);
+    let separator = if platform::is_windows() { ';' } else { ':' };
+    for entry in current_path.split(separator) {
+        push_unique_path(&mut paths, entry.trim().to_string());
     }
-    
-    paths.join(":")
+
+    paths.join(if platform::is_windows() { ";" } else { ":" })
+}
+
+fn push_unique_path(paths: &mut Vec<String>, path: String) {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let already_exists = if platform::is_windows() {
+        paths.iter().any(|existing| existing.eq_ignore_ascii_case(trimmed))
+    } else {
+        paths.iter().any(|existing| existing == trimmed)
+    };
+
+    if !already_exists {
+        paths.push(trimmed.to_string());
+    }
+}
+
+fn find_executable_in_path(candidates: &[&str], path_env: &str) -> Option<String> {
+    let separator = if platform::is_windows() { ';' } else { ':' };
+
+    for dir in path_env.split(separator) {
+        let dir = dir.trim().trim_matches('"');
+        if dir.is_empty() {
+            continue;
+        }
+
+        let dir_path = Path::new(dir);
+        if !dir_path.exists() {
+            continue;
+        }
+
+        for candidate in candidates {
+            let candidate_path = dir_path.join(candidate);
+            if candidate_path.exists() {
+                return Some(candidate_path.display().to_string());
+            }
+        }
+    }
+
+    None
 }
 
 /// 执行 Shell 命令（带扩展 PATH）
 pub fn run_command(cmd: &str, args: &[&str]) -> io::Result<Output> {
     let mut command = Command::new(cmd);
     command.args(args);
-    
-    // 在非 Windows 系统上使用扩展的 PATH
-    #[cfg(not(windows))]
-    {
-        let extended_path = get_extended_path();
+
+    let extended_path = get_extended_path();
+    if !extended_path.is_empty() {
         command.env("PATH", extended_path);
     }
-    
+
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
     
@@ -151,6 +235,11 @@ pub fn run_bash_output(script: &str) -> Result<String, String> {
 pub fn run_cmd(script: &str) -> io::Result<Output> {
     let mut cmd = Command::new("cmd");
     cmd.args(["/c", script]);
+
+    let extended_path = get_extended_path();
+    if !extended_path.is_empty() {
+        cmd.env("PATH", extended_path);
+    }
     
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -188,6 +277,11 @@ pub fn run_powershell(script: &str) -> io::Result<Output> {
     let mut cmd = Command::new("powershell");
     // 使用 -ExecutionPolicy Bypass 绕过执行策略限制
     cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script]);
+
+    let extended_path = get_extended_path();
+    if !extended_path.is_empty() {
+        cmd.env("PATH", extended_path);
+    }
     
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -234,6 +328,11 @@ pub fn spawn_background(script: &str) -> io::Result<()> {
     if platform::is_windows() {
         let mut cmd = Command::new("cmd");
         cmd.args(["/c", script]);
+
+        let extended_path = get_extended_path();
+        if !extended_path.is_empty() {
+            cmd.env("PATH", extended_path);
+        }
         
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -255,7 +354,7 @@ pub fn get_openclaw_path() -> Option<String> {
     if platform::is_windows() {
         let possible_paths = get_windows_openclaw_paths();
         for path in possible_paths {
-            if std::path::Path::new(&path).exists() {
+            if Path::new(&path).exists() {
                 info!("[Shell] 在 {} 找到 openclaw", path);
                 return Some(path);
             }
@@ -264,11 +363,21 @@ pub fn get_openclaw_path() -> Option<String> {
         // Unix: 检查常见的 npm 全局安装路径
         let possible_paths = get_unix_openclaw_paths();
         for path in possible_paths {
-            if std::path::Path::new(&path).exists() {
+            if Path::new(&path).exists() {
                 info!("[Shell] 在 {} 找到 openclaw", path);
                 return Some(path);
             }
         }
+    }
+
+    let path_candidates = if platform::is_windows() {
+        ["openclaw.cmd", "openclaw.exe", "openclaw"].as_slice()
+    } else {
+        ["openclaw"].as_slice()
+    };
+    if let Some(path) = find_executable_in_path(path_candidates, &get_extended_path()) {
+        info!("[Shell] 在扩展 PATH 中找到 openclaw: {}", path);
+        return Some(path);
     }
     
     // 回退：检查是否在 PATH 中
@@ -370,12 +479,27 @@ fn get_windows_openclaw_paths() -> Vec<String> {
     
     // 2. 用户目录下的 npm 全局路径
     if let Some(home) = dirs::home_dir() {
-        let npm_path = format!("{}\\AppData\\Roaming\\npm\\openclaw.cmd", home.display());
-        paths.push(npm_path);
+        let home_str = home.display().to_string();
+        paths.push(format!("{}\\AppData\\Roaming\\npm\\openclaw.cmd", home_str));
+        paths.push(format!("{}\\AppData\\Roaming\\npm\\openclaw", home_str));
+        paths.push(format!("{}\\AppData\\Local\\Volta\\bin\\openclaw.cmd", home_str));
+        paths.push(format!("{}\\AppData\\Local\\Volta\\bin\\openclaw", home_str));
+        paths.push(format!("{}\\scoop\\shims\\openclaw.cmd", home_str));
+        paths.push(format!("{}\\scoop\\shims\\openclaw", home_str));
+    }
+
+    if let Ok(npm_prefix) = std::env::var("NPM_CONFIG_PREFIX") {
+        paths.push(format!("{}\\openclaw.cmd", npm_prefix));
+        paths.push(format!("{}\\openclaw", npm_prefix));
+    }
+
+    if let Ok(nvm_symlink) = std::env::var("NVM_SYMLINK") {
+        paths.push(format!("{}\\openclaw.cmd", nvm_symlink));
     }
     
     // 3. Program Files 下的 nodejs
     paths.push("C:\\Program Files\\nodejs\\openclaw.cmd".to_string());
+    paths.push("C:\\Program Files (x86)\\nodejs\\openclaw.cmd".to_string());
     
     paths
 }

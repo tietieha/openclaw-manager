@@ -6,8 +6,8 @@ use log::{info, debug};
 #[command]
 pub async fn check_openclaw_installed() -> Result<bool, String> {
     info!("[进程检查] 检查 OpenClaw 是否已安装...");
-    // 使用 get_openclaw_path 来检查，因为在 Windows 上 command_exists 可能不可靠
-    let installed = shell::get_openclaw_path().is_some();
+    // 以实际可执行为准，避免只找到 shim 但无法运行时误判为已安装
+    let installed = shell::run_openclaw(&["--version"]).is_ok() || shell::get_openclaw_path().is_some();
     info!("[进程检查] OpenClaw 安装状态: {}", if installed { "已安装" } else { "未安装" });
     Ok(installed)
 }
@@ -68,11 +68,6 @@ pub async fn check_port_in_use(port: u16) -> Result<bool, String> {
 #[command]
 pub async fn get_node_version() -> Result<Option<String>, String> {
     info!("[进程检查] 获取 Node.js 版本...");
-    if !shell::command_exists("node") {
-        info!("[进程检查] Node.js 未安装");
-        return Ok(None);
-    }
-    
     match shell::run_command_output("node", &["--version"]) {
         Ok(version) => {
             info!("[进程检查] Node.js 版本: {}", version);
@@ -80,6 +75,7 @@ pub async fn get_node_version() -> Result<Option<String>, String> {
         },
         Err(e) => {
             debug!("[进程检查] 获取 Node.js 版本失败: {}", e);
+            info!("[进程检查] Node.js 未安装或不可用");
             Ok(None)
         },
     }

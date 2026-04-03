@@ -11,7 +11,7 @@ export default defineConfig({
   
   // Tauri 期望使用固定端口，如果端口不可用则失败
   server: {
-    port: 1420,
+    port: 5173,
     strictPort: true,
     watch: {
       // 监听 src-tauri 目录变化
