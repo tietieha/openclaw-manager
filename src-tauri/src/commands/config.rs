@@ -1592,14 +1592,25 @@ pub async fn get_skills_list() -> Result<Vec<SkillDefinition>, String> {
         .unwrap_or_default();
 
     // 获取已安装的插件列表（通过 openclaw plugins list）
-    let installed_plugins: Vec<String> = match shell::run_openclaw(&["plugins", "list"]) {
-        Ok(output) => {
-            output.lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
+    // 注意：这个调用可能较慢，如果失败则基于配置文件推断安装状态
+    let installed_plugins: Vec<String> = {
+        debug!("[技能库] 尝试获取已安装插件列表（可能较慢）...");
+        match shell::run_openclaw(&["plugins", "list"]) {
+            Ok(output) => {
+                debug!("[技能库] ✓ 成功获取插件列表");
+                output.lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
+            }
+            Err(e) => {
+                warn!("[技能库] 获取插件列表失败: {}，将基于配置推断", e);
+                // 从 plugins.entries 推断已安装的非内置插件
+                plugins_entries.keys()
+                    .map(|k| k.to_string())
+                    .collect()
+            }
         }
-        Err(_) => Vec::new(),
     };
 
     let mut skills = get_preset_skills();
@@ -1628,11 +1639,17 @@ pub async fn get_skills_list() -> Result<Vec<SkillDefinition>, String> {
 
         // 对于非内置技能，检查是否已安装
         if skill.source != "builtin" {
-            let pkg = skill.package_name.as_deref().unwrap_or(&skill.id);
-            skill.installed = installed_plugins.iter().any(|line| {
-                line.to_lowercase().contains(&pkg.to_lowercase())
-                    || line.to_lowercase().contains(&skill.id.to_lowercase())
-            });
+            // 优先从 plugins.entries 判断（速度快）
+            if plugins_entries.contains_key(&skill.id) {
+                skill.installed = true;
+            } else if !installed_plugins.is_empty() {
+                // 其次从实际插件列表查找（较慢，仅在前面未匹配时使用）
+                let pkg = skill.package_name.as_deref().unwrap_or(&skill.id);
+                skill.installed = installed_plugins.iter().any(|line| {
+                    line.to_lowercase().contains(&pkg.to_lowercase())
+                        || line.to_lowercase().contains(&skill.id.to_lowercase())
+                });
+            }
         }
     }
 

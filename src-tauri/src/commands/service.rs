@@ -2,6 +2,8 @@ use crate::models::ServiceStatus;
 use crate::utils::shell;
 use tauri::command;
 use std::process::Command;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use log::{info, debug};
 
 #[cfg(windows)]
@@ -242,52 +244,31 @@ pub async fn restart_service() -> Result<String, String> {
 /// 获取日志（直接读取日志文件，比 RPC 更可靠）
 #[command]
 pub async fn get_logs(lines: Option<u32>) -> Result<Vec<String>, String> {
-    let n = lines.unwrap_or(100);
-    
+    let n = lines.unwrap_or(100) as usize;
     let config_dir = crate::utils::platform::get_config_dir();
-    
-    // 尝试多个已知的日志文件位置
     let log_files = vec![
         format!("{}/logs/gateway.log", config_dir),
         format!("{}/logs/gateway.err.log", config_dir),
         format!("{}/stderr.log", config_dir),
         format!("{}/stdout.log", config_dir),
     ];
-    
-    let mut all_lines: Vec<String> = Vec::new();
-    
+
     for log_file in &log_files {
-        if !std::path::Path::new(log_file).exists() {
+        let path = std::path::Path::new(log_file);
+        if !path.exists() {
             continue;
         }
-        
-        // 使用 tail 高效读取最后 N 行
-        match Command::new("tail")
-            .args(["-n", &n.to_string(), log_file])
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let content = String::from_utf8_lossy(&output.stdout);
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        all_lines.push(trimmed.to_string());
-                    }
-                }
+        // 直接读取最后 N 行
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            let lines_vec: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+            let total = lines_vec.len();
+            let start = if total > n { total - n } else { 0 };
+            let result = lines_vec[start..].to_vec();
+            if !result.is_empty() {
+                return Ok(result);
             }
-            _ => continue,
         }
     }
-    
-    // 尝试按时间戳排序（日志格式通常以 ISO 时间戳开头）
-    all_lines.sort();
-    
-    // 去重并保留最后 N 行
-    all_lines.dedup();
-    let total = all_lines.len();
-    if total > n as usize {
-        all_lines = all_lines.split_off(total - n as usize);
-    }
-    
-    Ok(all_lines)
+    Ok(vec![])
 }

@@ -93,11 +93,16 @@ export function ServiceManager() {
             )}
           >
             {actionLoading === 'start' ? (
-              <Loader2 size={16} className="animate-spin" />
+              <>
+                <Loader2 size={16} className="animate-spin" />
+                <span>启动中...</span>
+              </>
             ) : (
-              <Play size={16} />
+              <>
+                <Play size={16} />
+                <span>启动</span>
+              </>
             )}
-            启动
           </button>
 
           <button
