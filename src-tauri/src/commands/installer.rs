@@ -60,7 +60,9 @@ pub async fn check_environment() -> Result<EnvironmentStatus, String> {
     // 检查 OpenClaw
     info!("[环境检查] 检查 OpenClaw...");
     let openclaw_version = get_openclaw_version();
-    let openclaw_installed = openclaw_version.is_some();
+    // Installation and execution are different states: an installed OpenClaw
+    // can refuse to start when the currently selected Node.js is unsupported.
+    let openclaw_installed = shell::get_openclaw_path().is_some();
     info!("[环境检查] OpenClaw: installed={}, version={:?}", 
         openclaw_installed, openclaw_version);
     
@@ -280,22 +282,28 @@ fn get_windows_node_paths() -> Vec<String> {
 
 /// 获取 OpenClaw 版本
 fn get_openclaw_version() -> Option<String> {
-    // 使用 run_openclaw 统一处理各平台
+    // Prefer the CLI result, but preserve the installed package version when
+    // the CLI cannot start (for example, because Node.js is too old).
     shell::run_openclaw(&["--version"])
         .ok()
         .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(shell::get_openclaw_package_version)
 }
 
-/// 检查 Node.js 版本是否 >= 22
+/// 检查 Node.js 是否满足当前 OpenClaw 发布版支持的版本范围。
 fn check_node_version_requirement(version: &Option<String>) -> bool {
     if let Some(v) = version {
-        // 解析版本号 "v22.1.0" -> 22
-        let major = v.trim_start_matches('v')
-            .split('.')
-            .next()
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(0);
-        major >= 22
+        let mut parts = v.trim_start_matches('v').split('.');
+        let major = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let minor = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+        let patch = parts.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+
+        // OpenClaw currently requires: >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0.
+        matches!(major, 22) && (minor > 22 || (minor == 22 && patch >= 3))
+            || matches!(major, 24) && minor >= 15
+            || major > 25
+            || matches!(major, 25) && minor >= 9
     } else {
         false
     }
@@ -342,22 +350,23 @@ pub async fn install_nodejs() -> Result<InstallResult, String> {
 
 /// Windows 安装 Node.js
 async fn install_nodejs_windows() -> Result<InstallResult, String> {
-    // 使用 winget 安装 Node.js（Windows 10/11 自带）
+    // Always attempt an upgrade first. A Node.js executable can exist but be
+    // too old for the installed OpenClaw version.
     let script = r#"
 $ErrorActionPreference = 'Stop'
 
-# 检查是否已安装
-$nodeVersion = node --version 2>$null
-if ($nodeVersion) {
-    Write-Host "Node.js 已安装: $nodeVersion"
-    exit 0
-}
-
-# 优先使用 winget
+# 优先使用 winget；先升级，未安装时再安装。
 $hasWinget = Get-Command winget -ErrorAction SilentlyContinue
 if ($hasWinget) {
-    Write-Host "使用 winget 安装 Node.js..."
-    winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+    Write-Host "使用 winget 更新 Node.js..."
+    winget upgrade --id OpenJS.NodeJS.LTS --exact --silent --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "Node.js 更新成功！"
+        exit 0
+    }
+
+    Write-Host "未检测到可升级的 Node.js，尝试安装..."
+    winget install --id OpenJS.NodeJS.LTS --exact --silent --accept-source-agreements --accept-package-agreements
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Node.js 安装成功！"
         exit 0
@@ -373,10 +382,10 @@ Invoke-Expression $fnmInstallScript
 $env:FNM_DIR = "$env:USERPROFILE\.fnm"
 $env:Path = "$env:FNM_DIR;$env:Path"
 
-# 安装 Node.js 22
-fnm install 22
-fnm default 22
-fnm use 22
+# 安装当前 LTS 的 Node.js 24
+fnm install 24
+fnm default 24
+fnm use 24
 
 # 验证安装
 $nodeVersion = node --version 2>$null
@@ -391,17 +400,18 @@ if ($nodeVersion) {
     
     match shell::run_powershell_output(script) {
         Ok(output) => {
-            // 验证安装
-            if get_node_version().is_some() {
+            // The binary must meet OpenClaw's actual supported version range.
+            let node_version = get_node_version();
+            if check_node_version_requirement(&node_version) {
                 Ok(InstallResult {
                     success: true,
-                    message: "Node.js 安装成功！请重启应用以使环境变量生效。".to_string(),
+                    message: format!("Node.js 已更新到 {}。", node_version.unwrap_or_default()),
                     error: None,
                 })
             } else {
                 Ok(InstallResult {
                     success: false,
-                    message: "安装后需要重启应用".to_string(),
+                    message: "Node.js 已安装，但版本仍不兼容 OpenClaw。".to_string(),
                     error: Some(output),
                 })
             }
@@ -703,8 +713,11 @@ Write-Host ""
 # 检查 winget
 $hasWinget = Get-Command winget -ErrorAction SilentlyContinue
 if ($hasWinget) {
-    Write-Host "正在使用 winget 安装 Node.js 22..." -ForegroundColor Yellow
-    winget install --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
+    Write-Host "正在使用 winget 更新 Node.js..." -ForegroundColor Yellow
+    winget upgrade --id OpenJS.NodeJS.LTS --exact --silent --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -ne 0) {
+        winget install --id OpenJS.NodeJS.LTS --exact --silent --accept-source-agreements --accept-package-agreements
+    }
 } else {
     Write-Host "请从以下地址下载安装 Node.js:" -ForegroundColor Yellow
     Write-Host "https://nodejs.org/en/download" -ForegroundColor Green

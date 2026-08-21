@@ -328,6 +328,7 @@
     "os": "Operating System",
     "notInstalled": "Not Installed",
     "needsV22": "requires v22+",
+    "needsCompatibleNode": "requires a compatible Node.js version (v22.22.3+, v24.15.0+, or v25.9.0+)",
     "installing": "Installing...",
     "install": "Install",
     "recheck": "Recheck",

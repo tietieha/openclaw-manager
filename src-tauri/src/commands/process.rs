@@ -25,7 +25,7 @@ pub async fn get_openclaw_version() -> Result<Option<String>, String> {
         },
         Err(e) => {
             debug!("[进程检查] 获取版本失败: {}", e);
-            Ok(None)
+            Ok(shell::get_openclaw_package_version())
         },
     }
 }

@@ -2,6 +2,15 @@ use crate::models::{AITestResult, ChannelTestResult, DiagnosticResult, SystemInf
 use crate::utils::{platform, shell};
 use tauri::command;
 use log::{info, warn, error, debug};
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+pub struct DoctorFixResult {
+    pub success: bool,
+    pub message: String,
+    pub backup_path: Option<String>,
+    pub restart_message: Option<String>,
+}
 
 /// 去除 ANSI 转义序列（颜色代码等）
 fn strip_ansi_codes(input: &str) -> String {
@@ -169,6 +178,53 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     }
     
     Ok(results)
+}
+
+/// Back up the active configuration, let OpenClaw repair compatible settings,
+/// then restart the local gateway so the repaired configuration is verified.
+#[command]
+pub async fn fix_openclaw_config() -> Result<DoctorFixResult, String> {
+    let config_path = platform::get_config_file_path();
+    let config_file = std::path::Path::new(&config_path);
+    if !config_file.exists() {
+        return Ok(DoctorFixResult {
+            success: false,
+            message: "未找到 OpenClaw 配置文件，无法执行自动修复。".to_string(),
+            backup_path: None,
+            restart_message: None,
+        });
+    }
+
+    let backups_dir = std::path::Path::new(&platform::get_config_dir()).join("backups");
+    std::fs::create_dir_all(&backups_dir).map_err(|error| format!("创建配置备份目录失败: {}", error))?;
+    let backup_path = backups_dir.join(format!(
+        "openclaw-manager-doctor-fix-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    std::fs::copy(config_file, &backup_path).map_err(|error| format!("备份 OpenClaw 配置失败: {}", error))?;
+
+    match shell::run_openclaw(&["doctor", "--fix"]) {
+        Ok(_) => match crate::commands::service::restart_service().await {
+            Ok(restart_message) => Ok(DoctorFixResult {
+                success: true,
+                message: "已修复 OpenClaw 配置并成功重启网关。".to_string(),
+                backup_path: Some(backup_path.display().to_string()),
+                restart_message: Some(restart_message),
+            }),
+            Err(error) => Ok(DoctorFixResult {
+                success: false,
+                message: format!("配置已修复，但网关重启失败: {}", error),
+                backup_path: Some(backup_path.display().to_string()),
+                restart_message: None,
+            }),
+        },
+        Err(error) => Ok(DoctorFixResult {
+            success: false,
+            message: format!("OpenClaw 自动修复失败: {}", error),
+            backup_path: Some(backup_path.display().to_string()),
+            restart_message: None,
+        }),
+    }
 }
 
 /// 测试 AI 连接

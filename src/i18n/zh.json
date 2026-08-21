@@ -328,6 +328,7 @@
     "os": "操作系统",
     "notInstalled": "未安装",
     "needsV22": "需要 v22+",
+    "needsCompatibleNode": "需要兼容的 Node.js 版本（v22.22.3+、v24.15.0+ 或 v25.9.0+）",
     "installing": "安装中...",
     "install": "安装",
     "recheck": "重新检查",

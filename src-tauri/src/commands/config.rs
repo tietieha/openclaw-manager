@@ -942,10 +942,14 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
     // 这些字段只用于测试，不保存到 openclaw.json，而是保存到 env 文件
     let test_only_fields = vec!["userId", "testChatId", "testChannelId"];
     
-    // 构建渠道配置
-    let mut channel_obj = json!({
-        "enabled": true
-    });
+    // Merge only fields the UI submits. Recreating the object stringifies
+    // unsupported nested settings such as allow lists and group definitions.
+    let mut channel_obj = config["channels"]
+        .get(&channel.id)
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| json!({}));
+    channel_obj["enabled"] = json!(channel.enabled);
     
     // 添加渠道特定配置
     for (key, value) in &channel.config {
@@ -2141,4 +2145,3 @@ pub async fn set_default_agent(agent_id: String) -> Result<String, String> {
     info!("[Agent 管理] ✓ 默认 Agent 已设为 {}", agent_id);
     Ok(format!("默认 Agent 已设为 {}", agent_id))
 }
-

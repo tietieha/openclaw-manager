@@ -135,6 +135,13 @@ export interface DiagnosticResult {
   suggestion: string | null;
 }
 
+export interface DoctorFixResult {
+  success: boolean;
+  message: string;
+  backup_path: string | null;
+  restart_message: string | null;
+}
+
 // AI 测试结果
 export interface AITestResult {
   success: boolean;
@@ -202,6 +209,7 @@ export const api = {
 
   // 诊断测试
   runDoctor: () => invokeWithLog<DiagnosticResult[]>('run_doctor'),
+  fixOpenclawConfig: () => invokeWithLog<DoctorFixResult>('fix_openclaw_config'),
   testAIConnection: () => invokeWithLog<AITestResult>('test_ai_connection'),
   testChannel: (channelType: string) =>
     invokeWithLog<unknown>('test_channel', { channelType }),

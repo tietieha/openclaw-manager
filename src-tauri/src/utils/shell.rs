@@ -398,6 +398,43 @@ pub fn get_openclaw_path() -> Option<String> {
     None
 }
 
+/// Returns the installed package version without starting the CLI.
+///
+/// A global npm shim can exist even when the active Node.js version is not
+/// supported by OpenClaw. Reading its adjacent package manifest keeps the
+/// installation check separate from the runtime check.
+pub fn get_openclaw_package_version() -> Option<String> {
+    let executable_path = get_openclaw_path()?;
+    let executable = Path::new(&executable_path);
+    let parent = executable.parent()?;
+
+    let manifest_paths = [
+        // npm's Windows shims live next to node_modules.
+        parent.join("node_modules").join("openclaw").join("package.json"),
+        // Unix npm prefixes usually use <prefix>/bin and <prefix>/lib/node_modules.
+        parent.parent()?.join("lib").join("node_modules").join("openclaw").join("package.json"),
+    ];
+
+    for manifest_path in manifest_paths {
+        let content = match std::fs::read_to_string(&manifest_path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let version = serde_json::from_str::<serde_json::Value>(&content)
+            .ok()?
+            .get("version")?
+            .as_str()?
+            .trim()
+            .to_string();
+        if !version.is_empty() {
+            info!("[Shell] Found OpenClaw package version {} at {}", version, manifest_path.display());
+            return Some(version);
+        }
+    }
+
+    None
+}
+
 /// 获取 Unix 系统上可能的 openclaw 安装路径
 fn get_unix_openclaw_paths() -> Vec<String> {
     let mut paths = Vec::new();
@@ -519,13 +556,14 @@ pub fn run_openclaw(args: &[&str]) -> Result<String, String> {
     let extended_path = get_extended_path();
     debug!("[Shell] 扩展 PATH: {}", extended_path);
     
+    let gateway_token = get_gateway_token();
     let output = if openclaw_path.ends_with(".cmd") {
         // Windows: .cmd 文件需要通过 cmd /c 执行
         let mut cmd_args = vec!["/c", &openclaw_path];
         cmd_args.extend(args);
         let mut cmd = Command::new("cmd");
         cmd.args(&cmd_args)
-            .env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN)
+            .env("OPENCLAW_GATEWAY_TOKEN", &gateway_token)
             .env("PATH", &extended_path);
         
         #[cfg(windows)]
@@ -535,7 +573,7 @@ pub fn run_openclaw(args: &[&str]) -> Result<String, String> {
     } else {
         let mut cmd = Command::new(&openclaw_path);
         cmd.args(args)
-            .env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN)
+            .env("OPENCLAW_GATEWAY_TOKEN", &gateway_token)
             .env("PATH", &extended_path);
         
         #[cfg(windows)]
@@ -566,6 +604,30 @@ pub fn run_openclaw(args: &[&str]) -> Result<String, String> {
 
 /// 默认的 Gateway Token
 pub const DEFAULT_GATEWAY_TOKEN: &str = "openclaw-manager-local-token";
+
+/// Resolve the Gateway token without overwriting a token the user already
+/// configured in OpenClaw. The manager's default is only for unconfigured
+/// local installations.
+fn get_gateway_token() -> String {
+    let env_vars = load_openclaw_env_vars();
+    if let Some(token) = env_vars.get("OPENCLAW_GATEWAY_TOKEN") {
+        if !token.trim().is_empty() {
+            return token.clone();
+        }
+    }
+
+    if let Ok(content) = std::fs::read_to_string(platform::get_config_file_path()) {
+        if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(token) = config.pointer("/gateway/auth/token").and_then(|value| value.as_str()) {
+                if !token.trim().is_empty() {
+                    return token.to_string();
+                }
+            }
+        }
+    }
+
+    DEFAULT_GATEWAY_TOKEN.to_string()
+}
 
 /// 从 ~/.openclaw/env 文件读取所有环境变量
 /// 与 shell 脚本 `source ~/.openclaw/env` 行为一致
@@ -644,7 +706,7 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
     
     // 设置 PATH 和 gateway token
     cmd.env("PATH", &extended_path);
-    cmd.env("OPENCLAW_GATEWAY_TOKEN", DEFAULT_GATEWAY_TOKEN);
+    cmd.env("OPENCLAW_GATEWAY_TOKEN", get_gateway_token());
     
     // Windows: 隐藏控制台窗口
     #[cfg(windows)]

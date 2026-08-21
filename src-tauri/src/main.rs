@@ -62,6 +62,7 @@ fn main() {
             config::install_qqbot_plugin,
             // 诊断测试
             diagnostics::run_doctor,
+            diagnostics::fix_openclaw_config,
             diagnostics::test_ai_connection,
             diagnostics::test_channel,
             diagnostics::get_system_info,

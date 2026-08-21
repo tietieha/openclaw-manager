@@ -204,7 +204,7 @@ export function Setup({ onComplete, embedded = false }: SetupProps) {
                   <p className="text-content-primary font-medium">Node.js</p>
                   <p className="text-sm text-dark-400">
                     {envStatus.node_version
-                      ? `${envStatus.node_version} ${envStatus.node_version_ok ? '✓' : `(${t('setup.needsV22')})`}`
+                      ? `${envStatus.node_version} ${envStatus.node_version_ok ? '✓' : `(${t('setup.needsCompatibleNode')})`}`
                       : t('setup.notInstalled')}
                   </p>
                 </div>
@@ -246,7 +246,7 @@ export function Setup({ onComplete, embedded = false }: SetupProps) {
                 <div>
                   <p className="text-content-primary font-medium">OpenClaw</p>
                   <p className="text-sm text-dark-400">
-                    {envStatus.openclaw_version || t('setup.notInstalled')}
+                    {envStatus.openclaw_version || (envStatus.openclaw_installed ? t('setup.installed') : t('setup.notInstalled'))}
                   </p>
                 </div>
               </div>

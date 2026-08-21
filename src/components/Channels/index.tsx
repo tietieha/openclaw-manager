@@ -632,7 +632,9 @@ export function Channels() {
 
     if (channel) {
       const form: Record<string, string> = {};
-      Object.entries(channel.config).forEach(([key, value]) => {
+      const editableFields = channelInfo[channel.channel_type]?.fields ?? [];
+      editableFields.forEach(({ key }) => {
+        const value = channel.config[key];
         // 处理布尔值
         if (typeof value === 'boolean') {
           form[key] = value ? 'true' : 'false';

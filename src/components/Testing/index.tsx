@@ -8,9 +8,11 @@ import {
   Play,
   Loader2,
   Stethoscope,
+  Wrench,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { testingLogger } from '../../lib/logger';
+import { api, DoctorFixResult } from '../../lib/tauri';
 
 interface DiagnosticResult {
   name: string;
@@ -23,6 +25,8 @@ export function Testing() {
   const { t } = useTranslation();
   const [diagnosticResults, setDiagnosticResults] = useState<DiagnosticResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixResult, setFixResult] = useState<DoctorFixResult | null>(null);
 
   const runDiagnostics = async () => {
     testingLogger.action('运行系统诊断');
@@ -48,6 +52,27 @@ export function Testing() {
     }
   };
 
+  const fixConfiguration = async () => {
+    if (!window.confirm('将先备份 openclaw.json，再执行 OpenClaw 自动修复并重启网关。是否继续？')) return;
+
+    setFixing(true);
+    setFixResult(null);
+    try {
+      const result = await api.fixOpenclawConfig();
+      setFixResult(result);
+      await runDiagnostics();
+    } catch (error) {
+      setFixResult({
+        success: false,
+        message: `自动修复失败: ${String(error)}`,
+        backup_path: null,
+        restart_message: null,
+      });
+    } finally {
+      setFixing(false);
+    }
+  };
+
   // 统计结果
   const passedCount = diagnosticResults.filter(r => r.passed).length;
   const failedCount = diagnosticResults.filter(r => !r.passed).length;
@@ -69,19 +94,33 @@ export function Testing() {
                 </p>
               </div>
             </div>
-            <button
-              onClick={runDiagnostics}
-              disabled={loading}
-              className="btn-primary flex items-center gap-2"
-            >
-              {loading ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Play size={16} />
-              )}
-              {t('testing.runDiagnostics')}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={fixConfiguration}
+                disabled={loading || fixing}
+                className="btn-secondary flex items-center gap-2"
+                title="备份配置后执行 openclaw doctor --fix，并重启网关"
+              >
+                {fixing ? <Loader2 size={16} className="animate-spin" /> : <Wrench size={16} />}
+                自动修复并重启
+              </button>
+              <button
+                onClick={runDiagnostics}
+                disabled={loading || fixing}
+                className="btn-primary flex items-center gap-2"
+              >
+                {loading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} />}
+                {t('testing.runDiagnostics')}
+              </button>
+            </div>
           </div>
+
+          {fixResult && (
+            <div className={clsx('mb-4 p-3 rounded-lg text-sm', fixResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400')}>
+              <p>{fixResult.message}</p>
+              {fixResult.backup_path && <p className="mt-1 text-xs text-content-tertiary">配置备份：{fixResult.backup_path}</p>}
+            </div>
+          )}
 
           {/* 诊断结果统计 */}
           {diagnosticResults.length > 0 && (
