@@ -30,6 +30,8 @@ fn main() {
             service::stop_service,
             service::restart_service,
             service::get_logs,
+            service::get_gateway_autostart_status,
+            service::set_gateway_autostart,
             // 进程管理
             process::check_openclaw_installed,
             process::get_openclaw_version,

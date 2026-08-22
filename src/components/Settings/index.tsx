@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTranslation } from 'react-i18next';
 import {
@@ -12,7 +12,12 @@ import {
   AlertTriangle,
   X,
   Globe,
+  Power,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
+import { api, GatewayAutostartStatus } from '../../lib/tauri';
 
 interface InstallResult {
   success: boolean;
@@ -40,6 +45,45 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
   const [uninstallResult, setUninstallResult] = useState<InstallResult | null>(null);
+  const [autostartStatus, setAutostartStatus] = useState<GatewayAutostartStatus | null>(null);
+  const [autostartLoading, setAutostartLoading] = useState(true);
+  const [autostartChanging, setAutostartChanging] = useState(false);
+  const [autostartError, setAutostartError] = useState<string | null>(null);
+
+  const refreshAutostartStatus = async () => {
+    setAutostartLoading(true);
+    setAutostartError(null);
+    try {
+      setAutostartStatus(await api.getGatewayAutostartStatus());
+    } catch (error) {
+      setAutostartError(String(error));
+    } finally {
+      setAutostartLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshAutostartStatus();
+  }, []);
+
+  const toggleAutostart = async () => {
+    if (!autostartStatus?.supported) return;
+    const enable = !autostartStatus.enabled;
+    if (!window.confirm(enable
+      ? '启用后，OpenClaw 网关会在系统登录或启动时自动启动。是否继续？'
+      : '关闭后，OpenClaw 不会再随系统登录或启动自动启动。是否继续？')) return;
+
+    setAutostartChanging(true);
+    setAutostartError(null);
+    try {
+      setAutostartStatus(await api.setGatewayAutostart(enable));
+    } catch (error) {
+      setAutostartError(String(error));
+      await refreshAutostartStatus();
+    } finally {
+      setAutostartChanging(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -93,6 +137,40 @@ export function Settings({ onEnvironmentChange }: SettingsProps) {
   return (
     <div className="h-full overflow-y-auto scroll-container pr-2">
       <div className="max-w-2xl space-y-6">
+        {/* OpenClaw Gateway 开机自启动 */}
+        <div className="bg-surface-card rounded-2xl p-6 border border-edge">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-10 h-10 rounded-xl bg-green-500/20 flex items-center justify-center">
+              <Power size={20} className="text-green-400" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-content-primary">OpenClaw 开机自启动</h3>
+              <p className="text-xs text-content-tertiary">使用系统原生服务，独立于管理器运行（Windows/macOS/Linux）</p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-4 bg-surface-elevated rounded-lg">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                {autostartStatus?.enabled ? <CheckCircle2 size={18} className="text-green-400" /> : <XCircle size={18} className="text-content-tertiary" />}
+                <p className="text-sm text-content-primary">{autostartStatus?.enabled ? '已启用' : '未启用'}</p>
+              </div>
+              <p className="text-xs text-content-tertiary mt-1 break-words">
+                {autostartLoading ? '正在检查自启动服务状态…' : autostartError || autostartStatus?.detail}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button onClick={refreshAutostartStatus} disabled={autostartLoading || autostartChanging} className="p-2 text-content-secondary hover:text-content-primary disabled:opacity-50" title="刷新状态">
+                <RefreshCw size={16} className={autostartLoading ? 'animate-spin' : ''} />
+              </button>
+              <button onClick={toggleAutostart} disabled={autostartLoading || autostartChanging || !autostartStatus?.supported} className="btn-primary text-sm px-4 py-2 flex items-center gap-2 disabled:opacity-50">
+                {autostartChanging && <Loader2 size={16} className="animate-spin" />}
+                {autostartStatus?.enabled ? '关闭自启动' : '启用自启动'}
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Language Settings */}
         <div className="bg-dark-700 rounded-2xl p-6 border border-dark-500">
           <div className="flex items-center gap-3 mb-6">

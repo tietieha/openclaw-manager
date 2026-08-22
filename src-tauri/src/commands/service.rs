@@ -1,5 +1,6 @@
 use crate::models::ServiceStatus;
 use crate::utils::shell;
+use serde::Serialize;
 use tauri::command;
 use std::process::Command;
 use std::fs::File;
@@ -14,6 +15,81 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const SERVICE_PORT: u16 = 18789;
+
+#[derive(Debug, Serialize)]
+pub struct GatewayAutostartStatus {
+    pub supported: bool,
+    pub enabled: bool,
+    pub detail: String,
+}
+
+/// Checks OpenClaw's native persistent service independently of whether the
+/// gateway happens to be running right now. OpenClaw selects schtasks,
+/// launchd, or systemd for the host platform.
+#[command]
+pub async fn get_gateway_autostart_status() -> Result<GatewayAutostartStatus, String> {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("schtasks");
+        command.args(["/Query", "/TN", "OpenClaw Gateway"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output = command.output().map_err(|error| format!("检查开机自启动状态失败: {}", error))?;
+        let detail = String::from_utf8_lossy(if output.status.success() { &output.stdout } else { &output.stderr })
+            .trim()
+            .to_string();
+        return Ok(GatewayAutostartStatus {
+            supported: true,
+            enabled: output.status.success(),
+            detail: if detail.is_empty() {
+                if output.status.success() { "已创建 OpenClaw Gateway 计划任务。".to_string() } else { "尚未创建 OpenClaw Gateway 计划任务。".to_string() }
+            } else {
+                detail
+            },
+        });
+    }
+
+    #[cfg(not(windows))]
+    {
+        match shell::run_openclaw(&["gateway", "status"]) {
+            Ok(detail) => Ok(GatewayAutostartStatus {
+                supported: true,
+                enabled: !service_status_reports_missing(&detail),
+                detail,
+            }),
+            Err(detail) => Ok(GatewayAutostartStatus {
+                supported: true,
+                enabled: !service_status_reports_missing(&detail),
+                detail,
+            }),
+        }
+    }
+}
+
+fn service_status_reports_missing(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("service unit not found")
+        || detail.contains("service is not installed")
+        || detail.contains("scheduled task (missing)")
+        || detail.contains("launch agent (missing)")
+        || detail.contains("systemd service (missing)")
+}
+
+/// Uses OpenClaw's native service installer (schtasks, launchd, or systemd),
+/// so the gateway starts independently of OpenClaw Manager.
+#[command]
+pub async fn set_gateway_autostart(enabled: bool) -> Result<GatewayAutostartStatus, String> {
+    let args = if enabled { ["gateway", "install"].as_slice() } else { ["gateway", "uninstall"].as_slice() };
+    shell::run_openclaw(args).map_err(|error| {
+        let action = if enabled { "启用" } else { "关闭" };
+        format!("{} OpenClaw 开机自启动失败: {}", action, error)
+    })?;
+
+    let status = get_gateway_autostart_status().await?;
+    if enabled && !status.enabled {
+        return Err("OpenClaw 未创建开机自启动服务，请查看服务状态后再试。".to_string());
+    }
+    Ok(status)
+}
 
 /// 检测端口是否有服务在监听，返回 PID
 /// 简单直接：端口被占用 = 服务运行中

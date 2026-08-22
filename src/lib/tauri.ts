@@ -32,6 +32,12 @@ export interface ServiceStatus {
   cpu_percent: number | null;
 }
 
+export interface GatewayAutostartStatus {
+  supported: boolean;
+  enabled: boolean;
+  detail: string;
+}
+
 // 系统信息
 export interface SystemInfo {
   os: string;
@@ -160,6 +166,8 @@ export const api = {
   stopService: () => invokeWithLog<string>('stop_service'),
   restartService: () => invokeWithLog<string>('restart_service'),
   getLogs: (lines?: number) => invokeWithLog<string[]>('get_logs', { lines }),
+  getGatewayAutostartStatus: () => invokeWithLog<GatewayAutostartStatus>('get_gateway_autostart_status'),
+  setGatewayAutostart: (enabled: boolean) => invokeWithLog<GatewayAutostartStatus>('set_gateway_autostart', { enabled }),
 
   // 系统信息
   getSystemInfo: () => invokeWithLog<SystemInfo>('get_system_info'),
