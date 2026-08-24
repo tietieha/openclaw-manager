@@ -88,14 +88,18 @@ pub async fn check_environment() -> Result<EnvironmentStatus, String> {
 
 /// 获取 Node.js 版本
 /// 检测多个可能的安装路径，因为 GUI 应用不继承用户 shell 的 PATH
-fn get_node_version() -> Option<String> {
+pub(crate) fn get_node_version() -> Option<String> {
     if platform::is_windows() {
         // Windows: 先尝试直接调用（如果 PATH 已更新）
+        let mut fallback_version = None;
         if let Ok(v) = shell::run_cmd_output("node --version") {
             let version = v.trim().to_string();
             if !version.is_empty() && version.starts_with('v') {
                 info!("[环境检查] 通过 PATH 找到 Node.js: {}", version);
-                return Some(version);
+                if check_node_version_requirement(&Some(version.clone())) {
+                    return Some(version);
+                }
+                fallback_version = Some(version);
             }
         }
         
@@ -109,17 +113,25 @@ fn get_node_version() -> Option<String> {
                     let version = output.trim().to_string();
                     if !version.is_empty() && version.starts_with('v') {
                         info!("[环境检查] 在 {} 找到 Node.js: {}", path, version);
-                        return Some(version);
+                        if check_node_version_requirement(&Some(version.clone())) {
+                            return Some(version);
+                        }
+                        fallback_version.get_or_insert(version);
                     }
                 }
             }
         }
-        
-        None
+
+        fallback_version
     } else {
         // 先尝试直接调用
+        let mut fallback_version = None;
         if let Ok(v) = shell::run_command_output("node", &["--version"]) {
-            return Some(v.trim().to_string());
+            let version = v.trim().to_string();
+            if check_node_version_requirement(&Some(version.clone())) {
+                return Some(version);
+            }
+            fallback_version = Some(version);
         }
         
         // 检测常见的 Node.js 安装路径（macOS/Linux）
@@ -127,8 +139,14 @@ fn get_node_version() -> Option<String> {
         for path in possible_paths {
             if std::path::Path::new(&path).exists() {
                 if let Ok(output) = shell::run_command_output(&path, &["--version"]) {
-                    info!("[环境检查] 在 {} 找到 Node.js: {}", path, output.trim());
-                    return Some(output.trim().to_string());
+                    let version = output.trim().to_string();
+                    if !version.is_empty() && version.starts_with('v') {
+                        info!("[环境检查] 在 {} 找到 Node.js: {}", path, version);
+                        if check_node_version_requirement(&Some(version.clone())) {
+                            return Some(version);
+                        }
+                        fallback_version.get_or_insert(version);
+                    }
                 }
             }
         }
@@ -137,11 +155,15 @@ fn get_node_version() -> Option<String> {
         if let Ok(output) = shell::run_bash_output("source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null; node --version 2>/dev/null") {
             if !output.is_empty() && output.starts_with('v') {
                 info!("[环境检查] 通过用户 shell 找到 Node.js: {}", output.trim());
-                return Some(output.trim().to_string());
+                let version = output.trim().to_string();
+                if check_node_version_requirement(&Some(version.clone())) {
+                    return Some(version);
+                }
+                fallback_version.get_or_insert(version);
             }
         }
-        
-        None
+
+        fallback_version
     }
 }
 
@@ -152,6 +174,26 @@ fn get_unix_node_paths() -> Vec<String> {
     // Homebrew (macOS)
     paths.push("/opt/homebrew/bin/node".to_string()); // Apple Silicon
     paths.push("/usr/local/bin/node".to_string());     // Intel Mac
+    for prefix in ["/opt/homebrew", "/usr/local"] {
+        paths.push(format!("{}/opt/node/bin/node", prefix));
+        paths.push(format!("{}/opt/node@24/bin/node", prefix));
+        paths.push(format!("{}/opt/node@22/bin/node", prefix));
+    }
+
+    // Homebrew can be installed outside its usual Apple Silicon and Intel
+    // prefixes. Ask brew for each formula's real location as a final macOS
+    // fallback instead of relying only on the process PATH.
+    if platform::is_macos() {
+        for formula in ["node", "node@24", "node@22"] {
+            if let Ok(prefix) = shell::run_command_output("brew", &["--prefix", formula]) {
+                let node_path = std::path::Path::new(prefix.trim()).join("bin/node");
+                let node_path = node_path.display().to_string();
+                if !paths.contains(&node_path) {
+                    paths.push(node_path);
+                }
+            }
+        }
+    }
     
     // 系统安装
     paths.push("/usr/bin/node".to_string());
@@ -441,19 +483,24 @@ if ! command -v brew &> /dev/null; then
     fi
 fi
 
-echo "安装 Node.js 22..."
-brew install node@22
-brew link --overwrite node@22
+echo "安装 Node.js 24..."
+brew install node@24
+export PATH="$(brew --prefix node@24)/bin:$PATH"
 
 # 验证安装
 node --version
 "#;
     
     match shell::run_bash_output(script) {
-        Ok(output) => Ok(InstallResult {
+        Ok(output) if check_node_version_requirement(&get_node_version()) => Ok(InstallResult {
             success: true,
             message: format!("Node.js 安装成功！{}", output),
             error: None,
+        }),
+        Ok(output) => Ok(InstallResult {
+            success: false,
+            message: "Node.js 已安装，但版本仍不兼容 OpenClaw。".to_string(),
+            error: Some(output),
         }),
         Err(e) => Ok(InstallResult {
             success: false,
@@ -754,9 +801,9 @@ if ! command -v brew &> /dev/null; then
     fi
 fi
 
-echo "正在安装 Node.js 22..."
-brew install node@22
-brew link --overwrite node@22
+echo "正在安装 Node.js 24..."
+brew install node@24
+export PATH="$(brew --prefix node@24)/bin:$PATH"
 
 echo ""
 echo "安装完成！"

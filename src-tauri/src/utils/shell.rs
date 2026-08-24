@@ -56,6 +56,13 @@ pub fn get_extended_path() -> String {
         // 添加常见的可执行文件路径
         push_unique_path(&mut paths, "/opt/homebrew/bin".to_string());  // Homebrew on Apple Silicon
         push_unique_path(&mut paths, "/usr/local/bin".to_string());      // Homebrew on Intel / 常规安装
+        // Versioned Homebrew formulae are keg-only. Keep these paths so a
+        // GUI-launched app can use Node even when `brew link` is unavailable.
+        for prefix in ["/opt/homebrew", "/usr/local"] {
+            push_unique_path(&mut paths, format!("{}/opt/node/bin", prefix));
+            push_unique_path(&mut paths, format!("{}/opt/node@24/bin", prefix));
+            push_unique_path(&mut paths, format!("{}/opt/node@22/bin", prefix));
+        }
         push_unique_path(&mut paths, "/usr/bin".to_string());
         push_unique_path(&mut paths, "/bin".to_string());
 

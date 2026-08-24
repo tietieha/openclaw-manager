@@ -116,7 +116,8 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     });
     
     // 检查 Node.js
-    let node_check = shell::run_command_output("node", &["--version"]);
+    let node_check = crate::commands::installer::get_node_version()
+        .ok_or_else(|| "未安装".to_string());
     results.push(DiagnosticResult {
         name: "Node.js".to_string(),
         passed: node_check.is_ok(),
