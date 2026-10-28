@@ -10,6 +10,7 @@ import { api, ServiceStatus, isTauri } from '../../lib/tauri';
 import { Terminal, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import clsx from 'clsx';
 import { EnvironmentStatus } from '../../App';
+import { serviceLogger } from '../../lib/logger';
 
 interface DashboardProps {
   envStatus: EnvironmentStatus | null;
@@ -21,6 +22,7 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
   const [status, setStatus] = useState<ServiceStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [logsExpanded, setLogsExpanded] = useState(true);
   const [autoRefreshLogs, setAutoRefreshLogs] = useState(true);
@@ -34,8 +36,8 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
     try {
       const result = await api.getServiceStatus();
       setStatus(result);
-    } catch {
-      // 静默处理
+    } catch (error) {
+      serviceLogger.error('读取服务状态失败', error);
     } finally {
       setLoading(false);
     }
@@ -46,8 +48,8 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
     try {
       const result = await invoke<string[]>('get_logs', { lines: 50 });
       setLogs(result);
-    } catch {
-      // 静默处理
+    } catch (error) {
+      serviceLogger.error('读取运行日志失败', error);
     }
   };
 
@@ -57,13 +59,13 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
     if (!isTauri()) return;
 
     const statusInterval = setInterval(fetchStatus, 3000);
-    const logsInterval = autoRefreshLogs ? setInterval(fetchLogs, 2000) : null;
+    const logsInterval = autoRefreshLogs || actionLoading ? setInterval(fetchLogs, 1000) : null;
 
     return () => {
       clearInterval(statusInterval);
       if (logsInterval) clearInterval(logsInterval);
     };
-  }, [autoRefreshLogs]);
+  }, [autoRefreshLogs, actionLoading]);
 
   // 自动滚动到日志底部（仅在日志容器内部滚动，不影响页面）
   useEffect(() => {
@@ -74,27 +76,33 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
 
   const handleStart = async () => {
     if (!isTauri()) return;
+    setActionError(null);
+    setLogsExpanded(true);
     setActionLoading(true);
     try {
       await api.startService();
       await fetchStatus();
       await fetchLogs();
     } catch (e) {
-      console.error('启动失败:', e);
+      setActionError(String(e));
+      serviceLogger.error('启动失败', e);
     } finally {
+      await fetchLogs();
       setActionLoading(false);
     }
   };
 
   const handleStop = async () => {
     if (!isTauri()) return;
+    setActionError(null);
     setActionLoading(true);
     try {
       await api.stopService();
       await fetchStatus();
       await fetchLogs();
     } catch (e) {
-      console.error('停止失败:', e);
+      setActionError(String(e));
+      serviceLogger.error('停止失败', e);
     } finally {
       setActionLoading(false);
     }
@@ -102,14 +110,18 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
 
   const handleRestart = async () => {
     if (!isTauri()) return;
+    setActionError(null);
+    setLogsExpanded(true);
     setActionLoading(true);
     try {
       await api.restartService();
       await fetchStatus();
       await fetchLogs();
     } catch (e) {
-      console.error('重启失败:', e);
+      setActionError(String(e));
+      serviceLogger.error('重启失败', e);
     } finally {
+      await fetchLogs();
       setActionLoading(false);
     }
   };
@@ -170,6 +182,14 @@ export function Dashboard({ envStatus, onSetupComplete }: DashboardProps) {
             onStop={handleStop}
             onRestart={handleRestart}
           />
+          {actionLoading && (
+            <p role="status" className="mt-3 text-sm text-content-secondary">正在执行服务操作...</p>
+          )}
+          {actionError && (
+            <pre role="alert" className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-all text-sm text-red-400">
+              {actionError}
+            </pre>
+          )}
         </motion.div>
 
         <motion.div variants={itemVariants}>

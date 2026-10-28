@@ -34,6 +34,16 @@ fn save_openclaw_config(config: &Value) -> Result<(), String> {
     file::write_file(&config_path, &content).map_err(|e| format!("写入配置文件失败: {}", e))
 }
 
+/// Channel ids and plugin ids are usually the same, but the current official
+/// QQ Bot package registers `openclaw-qqbot` while retaining `channels.qqbot`
+/// for configuration.
+fn plugin_id_for_channel(channel_id: &str) -> &str {
+    match channel_id {
+        "qqbot" => "openclaw-qqbot",
+        _ => channel_id,
+    }
+}
+
 /// 获取完整配置
 #[command]
 pub async fn get_config() -> Result<Value, String> {
@@ -973,15 +983,16 @@ pub async fn save_channel_config(channel: ChannelConfig) -> Result<String, Strin
     config["channels"][&channel.id] = channel_obj;
     
     // 更新 plugins.allow 数组 - 确保渠道在白名单中
+    let plugin_id = plugin_id_for_channel(&channel.id);
     if let Some(allow_arr) = config["plugins"]["allow"].as_array_mut() {
-        let channel_id_val = json!(&channel.id);
-        if !allow_arr.contains(&channel_id_val) {
-            allow_arr.push(channel_id_val);
+        let plugin_id_val = json!(plugin_id);
+        if !allow_arr.contains(&plugin_id_val) {
+            allow_arr.push(plugin_id_val);
         }
     }
     
     // 更新 plugins.entries - 确保插件已启用
-    config["plugins"]["entries"][&channel.id] = json!({
+    config["plugins"]["entries"][plugin_id] = json!({
         "enabled": true
     });
     
@@ -1017,14 +1028,15 @@ pub async fn clear_channel_config(channel_id: String) -> Result<String, String> 
     }
     
     // 从 plugins.allow 数组中删除
+    let plugin_id = plugin_id_for_channel(&channel_id);
     if let Some(allow_arr) = config.pointer_mut("/plugins/allow").and_then(|v| v.as_array_mut()) {
-        allow_arr.retain(|v| v.as_str() != Some(&channel_id));
+        allow_arr.retain(|v| v.as_str() != Some(plugin_id));
         info!("[清空渠道配置] 已从 plugins.allow 中删除: {}", channel_id);
     }
     
     // 从 plugins.entries 中删除
     if let Some(entries) = config.pointer_mut("/plugins/entries").and_then(|v| v.as_object_mut()) {
-        entries.remove(&channel_id);
+        entries.remove(plugin_id);
         info!("[清空渠道配置] 已从 plugins.entries 中删除: {}", channel_id);
     }
     
@@ -1059,6 +1071,22 @@ pub struct FeishuPluginStatus {
     pub installed: bool,
     pub version: Option<String>,
     pub plugin_name: Option<String>,
+    /// Present when the local OpenClaw CLI could not be queried. This must not
+    /// be confused with an uninstalled plugin, otherwise users repeatedly try
+    /// an install while the actual Node/PATH/network problem stays hidden.
+    pub error: Option<String>,
+}
+
+const FEISHU_PLUGIN_ID: &str = "feishu";
+const FEISHU_PLUGIN_PACKAGE: &str = "@openclaw/feishu";
+
+fn feishu_plugin_not_installed(error: Option<String>) -> FeishuPluginStatus {
+    FeishuPluginStatus {
+        installed: false,
+        version: None,
+        plugin_name: None,
+        error,
+    }
 }
 
 /// 检查飞书插件是否已安装
@@ -1066,53 +1094,48 @@ pub struct FeishuPluginStatus {
 pub async fn check_feishu_plugin() -> Result<FeishuPluginStatus, String> {
     info!("[飞书插件] 检查飞书插件安装状态...");
     
-    // 执行 openclaw plugins list 命令
-    match shell::run_openclaw(&["plugins", "list"]) {
+    // JSON is stable across UI languages and OpenClaw versions. Text parsing
+    // previously hid CLI errors and was prone to matching unrelated plugins.
+    match shell::run_openclaw(&["plugins", "list", "--json"]) {
         Ok(output) => {
-            debug!("[飞书插件] plugins list 输出: {}", output);
-            
-            // 查找包含 feishu 的行（不区分大小写）
-            let lines: Vec<&str> = output.lines().collect();
-            let feishu_line = lines.iter().find(|line| {
-                line.to_lowercase().contains("feishu")
-            });
-            
-            if let Some(line) = feishu_line {
-                info!("[飞书插件] ✓ 飞书插件已安装: {}", line);
-                
-                // 尝试解析版本号（通常格式为 "name@version" 或 "name version"）
-                let version = if line.contains('@') {
-                    line.split('@').last().map(|s| s.trim().to_string())
-                } else {
-                    // 尝试匹配版本号模式 (如 0.1.2)
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    parts.iter()
-                        .find(|p| p.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-                        .map(|s| s.to_string())
-                };
-                
+            let parsed: Value = serde_json::from_str(&output).map_err(|error| {
+                format!("OpenClaw 返回的插件清单无法解析: {}", error)
+            })?;
+            let plugin = parsed
+                .get("plugins")
+                .and_then(Value::as_array)
+                .and_then(|plugins| plugins.iter().find(|plugin| {
+                    plugin.get("id").and_then(Value::as_str) == Some(FEISHU_PLUGIN_ID)
+                }));
+
+            if let Some(plugin) = plugin {
+                let package_name = plugin
+                    .get("packageName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(FEISHU_PLUGIN_PACKAGE);
+                let version = plugin
+                    .get("version")
+                    .or_else(|| plugin.get("packageVersion"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                info!("[飞书插件] ✓ 飞书插件已安装: {}", package_name);
                 Ok(FeishuPluginStatus {
                     installed: true,
                     version,
-                    plugin_name: Some(line.trim().to_string()),
+                    plugin_name: Some(package_name.to_string()),
+                    error: None,
                 })
             } else {
                 info!("[飞书插件] ✗ 飞书插件未安装");
-                Ok(FeishuPluginStatus {
-                    installed: false,
-                    version: None,
-                    plugin_name: None,
-                })
+                Ok(feishu_plugin_not_installed(None))
             }
         }
         Err(e) => {
             warn!("[飞书插件] 检查插件列表失败: {}", e);
-            // 如果命令失败，假设插件未安装
-            Ok(FeishuPluginStatus {
-                installed: false,
-                version: None,
-                plugin_name: None,
-            })
+            Ok(feishu_plugin_not_installed(Some(format!(
+                "无法检查 OpenClaw 插件环境：{}",
+                e
+            ))))
         }
     }
 }
@@ -1124,15 +1147,22 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
     
     // 先检查是否已安装
     let status = check_feishu_plugin().await?;
+    if let Some(error) = status.error {
+        return Err(format!(
+            "无法开始安装飞书插件。{}\n\n请先在“概览”确认 OpenClaw 与 Node.js 已安装并可运行，然后重试。",
+            error
+        ));
+    }
     if status.installed {
         info!("[飞书插件] 飞书插件已安装，跳过");
         return Ok(format!("飞书插件已安装: {}", status.plugin_name.unwrap_or_default()));
     }
     
-    // 安装飞书插件
-    // 注意：使用 @m1heng-clawd/feishu 包名
-    info!("[飞书插件] 执行 openclaw plugins install @m1heng-clawd/feishu ...");
-    match shell::run_openclaw(&["plugins", "install", "@m1heng-clawd/feishu"]) {
+    // Install OpenClaw's official Feishu plugin. The old
+    // @m1heng-clawd/feishu package is not registered as an official source by
+    // current OpenClaw releases and can be blocked on clean installations.
+    info!("[飞书插件] 执行 openclaw plugins install {} ...", FEISHU_PLUGIN_PACKAGE);
+    match shell::run_openclaw(&["plugins", "install", FEISHU_PLUGIN_PACKAGE]) {
         Ok(output) => {
             info!("[飞书插件] 安装输出: {}", output);
             
@@ -1143,12 +1173,14 @@ pub async fn install_feishu_plugin() -> Result<String, String> {
                 Ok(format!("飞书插件安装成功: {}", verify_status.plugin_name.unwrap_or_default()))
             } else {
                 warn!("[飞书插件] 安装命令执行成功但插件未找到");
-                Err("安装命令执行成功但插件未找到，请检查 openclaw 版本".to_string())
+                Err(verify_status.error.unwrap_or_else(|| {
+                    "安装命令已完成，但 OpenClaw 未识别到飞书插件；请检查 OpenClaw 版本和应用日志。".to_string()
+                }))
             }
         }
         Err(e) => {
             error!("[飞书插件] ✗ 安装失败: {}", e);
-            Err(format!("安装飞书插件失败: {}\n\n请手动执行: openclaw plugins install @m1heng-clawd/feishu", e))
+            Err(format!("安装官方飞书插件失败: {}\n\n可在终端执行: openclaw plugins install {}", e, FEISHU_PLUGIN_PACKAGE))
         }
     }
 }
@@ -1161,6 +1193,19 @@ pub struct QQBotPluginStatus {
     pub installed: bool,
     pub version: Option<String>,
     pub plugin_name: Option<String>,
+    pub error: Option<String>,
+}
+
+const QQBOT_PLUGIN_ID: &str = "openclaw-qqbot";
+const QQBOT_PLUGIN_PACKAGE: &str = "@tencent-connect/openclaw-qqbot";
+
+fn qqbot_plugin_not_installed(error: Option<String>) -> QQBotPluginStatus {
+    QQBotPluginStatus {
+        installed: false,
+        version: None,
+        plugin_name: None,
+        error,
+    }
 }
 
 /// 检查 QQ Bot 插件是否已安装
@@ -1168,51 +1213,47 @@ pub struct QQBotPluginStatus {
 pub async fn check_qqbot_plugin() -> Result<QQBotPluginStatus, String> {
     info!("[QQ Bot 插件] 检查 QQ Bot 插件安装状态...");
     
-    // 执行 openclaw plugins list 命令
-    match shell::run_openclaw(&["plugins", "list"]) {
+    match shell::run_openclaw(&["plugins", "list", "--json"]) {
         Ok(output) => {
-            debug!("[QQ Bot 插件] plugins list 输出: {}", output);
-            
-            // 查找包含 qqbot 的行（不区分大小写）
-            let lines: Vec<&str> = output.lines().collect();
-            let qqbot_line = lines.iter().find(|line| {
-                line.to_lowercase().contains("qqbot")
-            });
-            
-            if let Some(line) = qqbot_line {
-                info!("[QQ Bot 插件] ✓ QQ Bot 插件已安装: {}", line);
-                
-                // 尝试解析版本号
-                let version = if line.contains('@') {
-                    line.split('@').last().map(|s| s.trim().to_string())
-                } else {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    parts.iter()
-                        .find(|p| p.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false))
-                        .map(|s| s.to_string())
-                };
-                
+            let parsed: Value = serde_json::from_str(&output).map_err(|error| {
+                format!("OpenClaw 返回的插件清单无法解析: {}", error)
+            })?;
+            let plugin = parsed
+                .get("plugins")
+                .and_then(Value::as_array)
+                .and_then(|plugins| plugins.iter().find(|plugin| {
+                    let id = plugin.get("id").and_then(Value::as_str);
+                    id == Some(QQBOT_PLUGIN_ID) || id == Some("qqbot")
+                }));
+
+            if let Some(plugin) = plugin {
+                let package_name = plugin
+                    .get("packageName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(QQBOT_PLUGIN_PACKAGE);
+                let version = plugin
+                    .get("version")
+                    .or_else(|| plugin.get("packageVersion"))
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                info!("[QQ Bot 插件] ✓ QQ Bot 插件已安装: {}", package_name);
                 Ok(QQBotPluginStatus {
                     installed: true,
                     version,
-                    plugin_name: Some(line.trim().to_string()),
+                    plugin_name: Some(package_name.to_string()),
+                    error: None,
                 })
             } else {
                 info!("[QQ Bot 插件] ✗ QQ Bot 插件未安装");
-                Ok(QQBotPluginStatus {
-                    installed: false,
-                    version: None,
-                    plugin_name: None,
-                })
+                Ok(qqbot_plugin_not_installed(None))
             }
         }
         Err(e) => {
             warn!("[QQ Bot 插件] 检查插件列表失败: {}", e);
-            Ok(QQBotPluginStatus {
-                installed: false,
-                version: None,
-                plugin_name: None,
-            })
+            Ok(qqbot_plugin_not_installed(Some(format!(
+                "无法检查 OpenClaw 插件环境：{}",
+                e
+            ))))
         }
     }
 }
@@ -1224,14 +1265,19 @@ pub async fn install_qqbot_plugin() -> Result<String, String> {
     
     // 先检查是否已安装
     let status = check_qqbot_plugin().await?;
+    if let Some(error) = status.error {
+        return Err(format!(
+            "无法开始安装 QQ Bot 插件。{}\n\n请先在“概览”确认 OpenClaw 与 Node.js 已安装并可运行，然后重试。",
+            error
+        ));
+    }
     if status.installed {
         info!("[QQ Bot 插件] QQ Bot 插件已安装，跳过");
         return Ok(format!("QQ Bot 插件已安装: {}", status.plugin_name.unwrap_or_default()));
     }
     
-    // 安装 QQ Bot 插件
-    info!("[QQ Bot 插件] 执行 openclaw plugins install @sliverp/qqbot@latest ...");
-    match shell::run_openclaw(&["plugins", "install", "@sliverp/qqbot@latest"]) {
+    info!("[QQ Bot 插件] 执行 openclaw plugins install {} ...", QQBOT_PLUGIN_PACKAGE);
+    match shell::run_openclaw(&["plugins", "install", QQBOT_PLUGIN_PACKAGE]) {
         Ok(output) => {
             info!("[QQ Bot 插件] 安装输出: {}", output);
             
@@ -1242,12 +1288,14 @@ pub async fn install_qqbot_plugin() -> Result<String, String> {
                 Ok(format!("QQ Bot 插件安装成功: {}", verify_status.plugin_name.unwrap_or_default()))
             } else {
                 warn!("[QQ Bot 插件] 安装命令执行成功但插件未找到");
-                Err("安装命令执行成功但插件未找到，请检查 openclaw 版本".to_string())
+                Err(verify_status.error.unwrap_or_else(|| {
+                    "安装命令已完成，但 OpenClaw 未识别到 QQ Bot 插件；请检查 OpenClaw 版本和应用日志。".to_string()
+                }))
             }
         }
         Err(e) => {
             error!("[QQ Bot 插件] ✗ 安装失败: {}", e);
-            Err(format!("安装 QQ Bot 插件失败: {}\n\n请手动执行: openclaw plugins install @sliverp/qqbot@latest", e))
+            Err(format!("安装官方 QQ Bot 插件失败: {}\n\n可在终端执行: openclaw plugins install {}", e, QQBOT_PLUGIN_PACKAGE))
         }
     }
 }

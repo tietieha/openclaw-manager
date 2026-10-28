@@ -667,7 +667,7 @@ fn load_openclaw_env_vars() -> HashMap<String, String> {
 
 /// 后台启动 openclaw gateway
 /// 与 shell 脚本行为一致：先加载 env 文件，再启动 gateway
-pub fn spawn_openclaw_gateway() -> io::Result<()> {
+pub fn spawn_openclaw_gateway() -> io::Result<std::process::Child> {
     info!("[Shell] 后台启动 openclaw gateway...");
     
     let openclaw_path = get_openclaw_path().ok_or_else(|| {
@@ -721,23 +721,23 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
     
     // 将 stdout/stderr 重定向到日志文件，以便 get_logs 可以读取
     let logs_dir = format!("{}/logs", platform::get_config_dir());
-    let _ = std::fs::create_dir_all(&logs_dir);
+    std::fs::create_dir_all(&logs_dir)?;
     
     let stdout_log_path = format!("{}/gateway.log", logs_dir);
     let stderr_log_path = format!("{}/gateway.err.log", logs_dir);
     
     info!("[Shell] 日志输出到: {} / {}", stdout_log_path, stderr_log_path);
     
-    if let Ok(stdout_file) = std::fs::OpenOptions::new()
-        .create(true).append(true).open(&stdout_log_path)
-    {
-        cmd.stdout(std::process::Stdio::from(stdout_file));
-    }
-    if let Ok(stderr_file) = std::fs::OpenOptions::new()
-        .create(true).append(true).open(&stderr_log_path)
-    {
-        cmd.stderr(std::process::Stdio::from(stderr_file));
-    }
+    let mut stdout_file = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&stdout_log_path)?;
+    let mut stderr_file = std::fs::OpenOptions::new()
+        .create(true).append(true).open(&stderr_log_path)?;
+    use std::io::Write;
+    let marker = format!("\n[manager] {} gateway startup\n", chrono::Local::now().to_rfc3339());
+    stdout_file.write_all(marker.as_bytes())?;
+    stderr_file.write_all(marker.as_bytes())?;
+    cmd.stdout(std::process::Stdio::from(stdout_file));
+    cmd.stderr(std::process::Stdio::from(stderr_file));
     
     info!("[Shell] 启动 gateway 进程...");
     let child = cmd.spawn();
@@ -745,7 +745,7 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
     match child {
         Ok(c) => {
             info!("[Shell] ✓ Gateway 进程已启动, PID: {}", c.id());
-            Ok(())
+            Ok(c)
         }
         Err(e) => {
             warn!("[Shell] ✗ Gateway 启动失败: {}", e);
@@ -755,6 +755,130 @@ pub fn spawn_openclaw_gateway() -> io::Result<()> {
             ))
         }
     }
+}
+
+/// Read only a bounded suffix, including output that has not ended in a newline.
+pub fn read_log_tail(path: &Path, offset: u64, lines: usize) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let start = offset.min(length).max(length.saturating_sub(128 * 1024));
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let all: Vec<_> = text.lines().collect();
+    Ok(all[all.len().saturating_sub(lines)..].join("\n"))
+}
+
+/// Keep Doctor output visible to the log viewer while the command is running.
+pub fn run_openclaw_logged(args: &[&str]) -> Result<String, String> {
+    let path = get_openclaw_path().ok_or("找不到 openclaw 命令")?;
+    let logs = Path::new(&platform::get_config_dir()).join("logs");
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    let stdout_path = logs.join("doctor.log");
+    let stderr_path = logs.join("doctor.err.log");
+    let open_log = |path: &Path| {
+        std::fs::OpenOptions::new().create(true).append(true).open(path)
+    };
+    let mut stdout = open_log(&stdout_path).map_err(|e| e.to_string())?;
+    let mut stderr = open_log(&stderr_path).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let marker = format!("\n[manager] {} openclaw {}\n", chrono::Local::now().to_rfc3339(), args.join(" "));
+    stdout.write_all(marker.as_bytes()).map_err(|e| e.to_string())?;
+    stderr.write_all(marker.as_bytes()).map_err(|e| e.to_string())?;
+    let stdout_offset = stdout.metadata().map_err(|e| e.to_string())?.len();
+    let stderr_offset = stderr.metadata().map_err(|e| e.to_string())?.len();
+    let mut cmd = if path.ends_with(".cmd") {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", &path]);
+        cmd
+    } else {
+        Command::new(&path)
+    };
+    cmd.args(args)
+        .envs(load_openclaw_env_vars())
+        .env("PATH", get_extended_path())
+        .env("OPENCLAW_GATEWAY_TOKEN", get_gateway_token())
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let status = cmd.status().map_err(|e| e.to_string())?;
+    let output = format!("{}\n{}",
+        read_log_tail(&stdout_path, stdout_offset, 200).map_err(|e| e.to_string())?,
+        read_log_tail(&stderr_path, stderr_offset, 200).map_err(|e| e.to_string())?
+    );
+    if status.success() {
+        Ok(output)
+    } else {
+        Err(format!("openclaw {} 退出码: {}\n{}", args.join(" "), status, output.trim()))
+    }
+}
+
+fn powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn doctor_terminal_script(executable: &str, transcript: &str, receipt: &str) -> String {
+    format!(r#"$ErrorActionPreference = 'Stop'
+$exitCode = 1
+$message = ''
+$transcribing = $false
+try {{
+    Start-Transcript -Path {transcript} -Append | Out-Null
+    $transcribing = $true
+    Write-Host 'OpenClaw repair: answer prompts in this window.' -ForegroundColor Cyan
+    & {executable} doctor --fix | Out-Default
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) {{ $exitCode = 1 }}
+    $message = "Doctor exited with code $exitCode"
+}} catch {{
+    $message = $_.Exception.Message
+    Write-Host $message -ForegroundColor Red
+}} finally {{
+    if ($transcribing) {{ Stop-Transcript | Out-Null }}
+    @{{ exit_code = $exitCode; message = $message }} | ConvertTo-Json -Compress | Set-Content -LiteralPath {receipt} -Encoding UTF8
+}}
+Write-Host $message
+Read-Host 'Press Enter to close'
+"#, executable = powershell_literal(executable),
+        transcript = powershell_literal(transcript), receipt = powershell_literal(receipt))
+}
+
+/// A real console preserves native prompts; the receipt records Doctor, not launcher, completion.
+#[cfg(windows)]
+pub fn spawn_doctor_terminal(elevated: bool) -> Result<(std::process::Child, std::path::PathBuf, std::path::PathBuf), String> {
+    let executable = get_openclaw_path().ok_or("找不到 openclaw 命令")?;
+    let logs = Path::new(&platform::get_config_dir()).join("logs");
+    std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
+    let id = format!("{}-{}", std::process::id(), chrono::Local::now().timestamp_micros());
+    let script = logs.join(format!("doctor-terminal-{}.ps1", id));
+    let receipt = logs.join(format!("doctor-terminal-{}.result.json", id));
+    let transcript = logs.join(format!("doctor-terminal-{}.log", id));
+    std::fs::write(&script, doctor_terminal_script(
+        &executable, &transcript.display().to_string(), &receipt.display().to_string(),
+    )).map_err(|e| e.to_string())?;
+    // Start-Process creates the interactive console without inheriting the GUI's
+    // missing stdin handle. The hidden helper waits for that console to close.
+    let launch = format!(
+        "$ErrorActionPreference='Stop'; try {{ Start-Process powershell.exe -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File', '\"' + {} + '\"') {} -Wait }} catch {{ @{{exit_code=1;message=$_.Exception.Message}} | ConvertTo-Json -Compress | Set-Content -LiteralPath {} -Encoding UTF8; exit 1 }}",
+        powershell_literal(&script.display().to_string()),
+        if elevated { "-Verb RunAs" } else { "" },
+        powershell_literal(&receipt.display().to_string()),
+    );
+    let child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
+        .envs(load_openclaw_env_vars())
+        .env("PATH", get_extended_path())
+        .env("OPENCLAW_GATEWAY_TOKEN", get_gateway_token())
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn().map_err(|e| format!("打开修复终端失败: {}", e))?;
+    Ok((child, receipt, transcript))
 }
 
 /// 检查命令是否存在
@@ -777,5 +901,68 @@ pub fn command_exists(cmd: &str) -> bool {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn tail_respects_attempt_offset_and_incomplete_line() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("manager-tail-{}.log", std::process::id()));
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"old failure\n").unwrap();
+        let offset = file.metadata().unwrap().len();
+        file.write_all(b"migration running\nschema version 24").unwrap();
+        drop(file);
+        assert_eq!(read_log_tail(&path, offset, 10).unwrap(), "migration running\nschema version 24");
+        assert_eq!(read_log_tail(&path, 0, 1).unwrap(), "schema version 24");
+        assert_eq!(read_log_tail(&path, 0, 0).unwrap(), "");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn terminal_script_quotes_paths_and_keeps_interactive_input() {
+        let script = doctor_terminal_script("C:\\User's Files\\openclaw.cmd", "C:\\logs\\doctor.log", "C:\\logs\\result.json");
+        assert!(script.contains("& 'C:\\User''s Files\\openclaw.cmd' doctor --fix | Out-Default"));
+        assert!(!script.contains("--yes"));
+        assert!(!script.contains("--non-interactive"));
+        assert!(script.contains("$exitCode = $LASTEXITCODE"));
+        assert!(script.contains("Set-Content -LiteralPath 'C:\\logs\\result.json'"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn terminal_script_records_native_exit_and_output() {
+        let dir = std::env::temp_dir().join(format!("manager-terminal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("fake-doctor.cmd");
+        let transcript = dir.join("transcript.log");
+        let receipt = dir.join("receipt.json");
+        let script_path = dir.join("terminal.ps1");
+        std::fs::write(&executable, "@echo off\r\necho fake migration error\r\nexit /b 7\r\n").unwrap();
+        let script = doctor_terminal_script(
+            &executable.display().to_string(),
+            &transcript.display().to_string(),
+            &receipt.display().to_string(),
+        ).replace("Read-Host 'Press Enter to close'", "");
+        std::fs::write(&script_path, script).unwrap();
+        let output = Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(script_path).creation_flags(CREATE_NO_WINDOW).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let bytes = std::fs::read(&receipt).unwrap();
+        let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+        let value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(value["exit_code"], 7);
+        assert!(std::fs::read_to_string(transcript).unwrap().contains("fake migration error"));
+        // These are generated test fixtures, not OpenClaw user data.
+        std::fs::remove_file(executable).unwrap();
+        std::fs::remove_file(receipt).unwrap();
+        std::fs::remove_file(dir.join("terminal.ps1")).unwrap();
+        std::fs::remove_file(dir.join("transcript.log")).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 }

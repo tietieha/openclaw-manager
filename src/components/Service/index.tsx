@@ -15,6 +15,7 @@ import { serviceLogger } from '../../lib/logger';
 export function ServiceManager() {
   const [logs, setLogs] = useState<string[]>([]);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -33,15 +34,15 @@ export function ServiceManager() {
   useEffect(() => {
     serviceLogger.info('ServiceManager 组件挂载');
     fetchLogs();
-    if (autoRefresh) {
+    if (autoRefresh || actionLoading) {
       serviceLogger.debug('启动日志自动刷新 (间隔: 2秒)');
-      const interval = setInterval(fetchLogs, 2000);
+      const interval = setInterval(fetchLogs, 1000);
       return () => {
         serviceLogger.debug('停止日志自动刷新');
         clearInterval(interval);
       };
     }
-  }, [autoRefresh]);
+  }, [autoRefresh, actionLoading]);
 
   useEffect(() => {
     if (logsEndRef.current) {
@@ -52,6 +53,7 @@ export function ServiceManager() {
   const handleAction = async (action: 'start' | 'stop' | 'restart') => {
     serviceLogger.action(`服务操作: ${action}`);
     serviceLogger.info(`正在执行: ${action}_service`);
+    setActionError(null);
     setActionLoading(action);
     try {
       const result = await invoke(`${action}_service`);
@@ -59,8 +61,9 @@ export function ServiceManager() {
       await fetchLogs();
     } catch (e) {
       serviceLogger.error(`❌ ${action} 操作失败`, e);
-      alert(`操作失败: ${e}`);
+      setActionError(String(e));
     } finally {
+      await fetchLogs();
       setActionLoading(null);
     }
   };
@@ -162,13 +165,18 @@ export function ServiceManager() {
         </div>
       </div>
 
+      {actionError && (
+        <pre role="alert" className="mb-4 max-h-48 overflow-auto whitespace-pre-wrap break-all text-sm text-red-400">
+          {actionError}
+        </pre>
+      )}
       {/* 日志查看器 */}
       <div className="flex-1 bg-surface-sidebar rounded-xl border border-edge overflow-hidden flex flex-col">
         {/* 日志标题栏 */}
         <div className="flex items-center gap-2 px-4 py-2 bg-surface-card border-b border-edge">
           <Terminal size={14} className="text-content-tertiary" />
           <span className="text-xs text-content-secondary font-medium">
-            /tmp/openclaw-gateway.log
+            OpenClaw stdout / stderr
           </span>
           <div className="flex-1" />
           <span className="text-xs text-content-tertiary">
@@ -190,7 +198,7 @@ export function ServiceManager() {
               {logs.map((line, index) => (
                 <div
                   key={index}
-                  className={clsx('py-0.5', getLogLineClass(line))}
+                  className={clsx('py-0.5 whitespace-pre-wrap break-all', getLogLineClass(line))}
                 >
                   <span className="text-gray-600 mr-3 select-none">
                     {String(index + 1).padStart(4, ' ')}

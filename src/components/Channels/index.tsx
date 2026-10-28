@@ -32,12 +32,14 @@ interface FeishuPluginStatus {
   installed: boolean;
   version: string | null;
   plugin_name: string | null;
+  error: string | null;
 }
 
 interface QQBotPluginStatus {
   installed: boolean;
   version: string | null;
   plugin_name: string | null;
+  error: string | null;
 }
 
 interface ChannelConfig {
@@ -433,7 +435,12 @@ export function Channels() {
       setFeishuPluginStatus(status);
     } catch (e) {
       console.error('检查飞书插件失败:', e);
-      setFeishuPluginStatus({ installed: false, version: null, plugin_name: null });
+      setFeishuPluginStatus({
+        installed: false,
+        version: null,
+        plugin_name: null,
+        error: `无法检查 OpenClaw 插件环境：${String(e)}`,
+      });
     } finally {
       setFeishuPluginLoading(false);
     }
@@ -462,7 +469,12 @@ export function Channels() {
       setQqbotPluginStatus(status);
     } catch (e) {
       console.error('检查 QQ Bot 插件失败:', e);
-      setQqbotPluginStatus({ installed: false, version: null, plugin_name: null });
+      setQqbotPluginStatus({
+        installed: false,
+        version: null,
+        plugin_name: null,
+        error: `无法检查 OpenClaw 插件环境：${String(e)}`,
+      });
     } finally {
       setQqbotPluginLoading(false);
     }
@@ -829,11 +841,30 @@ export function Channels() {
                         <div className="flex-1">
                           <p className="text-green-400 font-medium">飞书插件已安装</p>
                           <p className="text-xs text-content-secondary mt-0.5">
-                            {feishuPluginStatus.plugin_name || '@m1heng-clawd/feishu'}
+                            {feishuPluginStatus.plugin_name || '@openclaw/feishu'}
                             {feishuPluginStatus.version && ` v${feishuPluginStatus.version}`}
                           </p>
                         </div>
                         <CheckCircle size={16} className="text-green-400" />
+                      </div>
+                    ) : feishuPluginStatus?.error ? (
+                      <div className="p-4 bg-red-500/10 rounded-xl border border-red-500/30">
+                        <div className="flex items-start gap-3">
+                          <XCircle size={20} className="text-red-400 mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-red-400 font-medium">无法检查飞书插件环境</p>
+                            <p className="text-xs text-content-secondary mt-1 break-words">
+                              {feishuPluginStatus.error}
+                            </p>
+                            <button
+                              onClick={checkFeishuPlugin}
+                              disabled={feishuPluginLoading}
+                              className="btn-secondary mt-3 flex items-center gap-2 text-sm py-2"
+                            >
+                              {t('channels.feishu.refreshStatus')}
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     ) : (
                       <div className="p-4 bg-amber-500/10 rounded-xl border border-amber-500/30">
@@ -842,7 +873,7 @@ export function Channels() {
                           <div className="flex-1">
                             <p className="text-amber-400 font-medium">需要安装飞书插件</p>
                             <p className="text-xs text-content-secondary mt-1">
-                              飞书渠道需要先安装 @m1heng-clawd/feishu 插件才能使用。
+                              飞书渠道需要先安装官方 @openclaw/feishu 插件才能使用。
                             </p>
                             <div className="mt-3 flex flex-wrap gap-2">
                               <button
@@ -866,7 +897,7 @@ export function Channels() {
                               </button>
                             </div>
                             <p className="text-xs text-content-tertiary mt-2">
-                              或手动执行: <code className="px-1.5 py-0.5 bg-surface-elevated rounded text-content-secondary">openclaw plugins install @m1heng-clawd/feishu</code>
+                              或手动执行: <code className="px-1.5 py-0.5 bg-surface-elevated rounded text-content-secondary">openclaw plugins install @openclaw/feishu</code>
                             </p>
                           </div>
                         </div>
@@ -889,11 +920,30 @@ export function Channels() {
                         <div className="flex-1">
                           <p className="text-green-400 font-medium">QQ Bot 插件已安装</p>
                           <p className="text-xs text-content-secondary mt-0.5">
-                            {qqbotPluginStatus.plugin_name || '@sliverp/qqbot'}
+                            {qqbotPluginStatus.plugin_name || '@tencent-connect/openclaw-qqbot'}
                             {qqbotPluginStatus.version && ` v${qqbotPluginStatus.version}`}
                           </p>
                         </div>
                         <CheckCircle size={16} className="text-green-400" />
+                      </div>
+                    ) : qqbotPluginStatus?.error ? (
+                      <div className="p-4 bg-red-500/10 rounded-xl border border-red-500/30">
+                        <div className="flex items-start gap-3">
+                          <XCircle size={20} className="text-red-400 mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-red-400 font-medium">无法检查 QQ Bot 插件环境</p>
+                            <p className="text-xs text-content-secondary mt-1 break-words">
+                              {qqbotPluginStatus.error}
+                            </p>
+                            <button
+                              onClick={checkQQBotPlugin}
+                              disabled={qqbotPluginLoading}
+                              className="btn-secondary mt-3 flex items-center gap-2 text-sm py-2"
+                            >
+                              刷新状态
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     ) : (
                       <div className="p-4 bg-amber-500/10 rounded-xl border border-amber-500/30">
@@ -902,7 +952,7 @@ export function Channels() {
                           <div className="flex-1">
                             <p className="text-amber-400 font-medium">需要安装 QQ Bot 插件</p>
                             <p className="text-xs text-content-secondary mt-1">
-                              QQ 渠道需要先安装 @sliverp/qqbot 插件才能使用。
+                              QQ 渠道需要先安装官方 @tencent-connect/openclaw-qqbot 插件才能使用。
                             </p>
                             <div className="mt-3 flex flex-wrap gap-2">
                               <button
@@ -926,7 +976,7 @@ export function Channels() {
                               </button>
                             </div>
                             <p className="text-xs text-content-tertiary mt-2">
-                              或手动执行: <code className="px-1.5 py-0.5 bg-surface-elevated rounded text-content-secondary">openclaw plugins install @sliverp/qqbot@latest</code>
+                              或手动执行: <code className="px-1.5 py-0.5 bg-surface-elevated rounded text-content-secondary">openclaw plugins install @tencent-connect/openclaw-qqbot</code>
                             </p>
                           </div>
                         </div>

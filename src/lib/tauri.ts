@@ -217,7 +217,7 @@ export const api = {
 
   // 诊断测试
   runDoctor: () => invokeWithLog<DiagnosticResult[]>('run_doctor'),
-  fixOpenclawConfig: () => invokeWithLog<DoctorFixResult>('fix_openclaw_config'),
+  fixOpenclawConfig: (elevated = false) => invokeWithLog<DoctorFixResult>('fix_openclaw_config', { elevated }),
   testAIConnection: () => invokeWithLog<AITestResult>('test_ai_connection'),
   testChannel: (channelType: string) =>
     invokeWithLog<unknown>('test_channel', { channelType }),

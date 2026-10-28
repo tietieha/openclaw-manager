@@ -1138,19 +1138,8 @@ fn get_latest_openclaw_version() -> Option<String> {
 /// current: 当前版本 (如 "1.0.0" 或 "v1.0.0")
 /// latest: 最新版本 (如 "1.0.1")
 fn compare_versions(current: &str, latest: &str) -> bool {
-    // 移除可能的 'v' 前缀和空白
-    let current = current.trim().trim_start_matches('v');
-    let latest = latest.trim().trim_start_matches('v');
-    
-    // 分割版本号
-    let current_parts: Vec<u32> = current
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    let latest_parts: Vec<u32> = latest
-        .split('.')
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    let current_parts = parse_version_parts(current);
+    let latest_parts = parse_version_parts(latest);
     
     // 比较每个部分
     for i in 0..3 {
@@ -1162,8 +1151,47 @@ fn compare_versions(current: &str, latest: &str) -> bool {
             return false;
         }
     }
-    
+
     false
+}
+
+/// 从命令行完整输出中取出版本号，例如
+/// "OpenClaw 2026.9.9 (bcfc888)" 会解析为 [2026, 9, 9]。
+fn parse_version_parts(version: &str) -> Vec<u32> {
+    let version = version.trim().trim_start_matches('v');
+    let Some(start) = version
+        .char_indices()
+        .find_map(|(index, character)| character.is_ascii_digit().then_some(index))
+    else {
+        return Vec::new();
+    };
+
+    version[start..]
+        .split('.')
+        .take(3)
+        .filter_map(|part| {
+            let numeric_prefix: String = part
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            numeric_prefix.parse::<u32>().ok()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::compare_versions;
+
+    #[test]
+    fn matching_cli_and_registry_versions_do_not_offer_update() {
+        assert!(!compare_versions("OpenClaw 2026.9.9 (bcfc888)", "2026.9.9"));
+    }
+
+    #[test]
+    fn newer_registry_version_offers_update() {
+        assert!(compare_versions("OpenClaw 2026.9.8 (bcfc888)", "2026.9.9"));
+    }
 }
 
 /// 更新 OpenClaw

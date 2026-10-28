@@ -245,7 +245,7 @@
       "helpText": "Get credentials from Feishu Open Platform. Chat ID can be found in group settings.",
       "pluginInstalled": "Feishu plugin installed",
       "pluginNeeded": "Feishu plugin required",
-      "pluginDesc": "The Feishu channel requires the @m1heng-clawd/feishu plugin to be installed first.",
+      "pluginDesc": "The Feishu channel requires the official @openclaw/feishu plugin to be installed first.",
       "installPlugin": "Install Plugin",
       "installing": "Installing...",
       "refreshStatus": "Refresh Status",

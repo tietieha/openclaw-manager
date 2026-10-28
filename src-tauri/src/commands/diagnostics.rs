@@ -3,6 +3,34 @@ use crate::utils::{platform, shell};
 use tauri::command;
 use log::{info, warn, error, debug};
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static DOCTOR_ACTIVE: AtomicBool = AtomicBool::new(false);
+struct DoctorGuard;
+impl DoctorGuard {
+    fn acquire() -> Result<Self, String> {
+        DOCTOR_ACTIVE.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| "诊断或修复仍在运行，请先完成当前操作。".to_string())?;
+        Ok(Self)
+    }
+}
+impl Drop for DoctorGuard {
+    fn drop(&mut self) {
+        DOCTOR_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+fn doctor_lint_passed(output: &str) -> bool {
+    for line in output.lines().rev() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) {
+            if let Some(ok) = value.get("ok").and_then(|v| v.as_bool()) {
+                return ok;
+            }
+        }
+    }
+    !output.contains("uses schema version")
+        && !output.contains("undergoing offline maintenance")
+}
 
 #[derive(Debug, Serialize)]
 pub struct DoctorFixResult {
@@ -93,6 +121,7 @@ fn extract_json_from_output(output: &str) -> Option<String> {
 /// 运行诊断
 #[command]
 pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
+    let _guard = DoctorGuard::acquire()?;
     info!("[诊断] 开始运行系统诊断...");
     let mut results = Vec::new();
     
@@ -169,10 +198,11 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     
     // 运行 openclaw doctor
     if openclaw_installed {
-        let doctor_result = shell::run_openclaw(&["doctor"]);
+        let doctor_result = tauri::async_runtime::spawn_blocking(|| shell::run_openclaw_logged(&["doctor", "--lint"]))
+            .await.map_err(|e| e.to_string())?;
         results.push(DiagnosticResult {
             name: "OpenClaw Doctor".to_string(),
-            passed: doctor_result.is_ok() && !doctor_result.as_ref().unwrap().contains("invalid"),
+            passed: doctor_result.as_ref().map(|output| doctor_lint_passed(output)).unwrap_or(false),
             message: doctor_result.unwrap_or_else(|e| e),
             suggestion: None,
         });
@@ -181,10 +211,15 @@ pub async fn run_doctor() -> Result<Vec<DiagnosticResult>, String> {
     Ok(results)
 }
 
-/// Back up the active configuration, let OpenClaw repair compatible settings,
-/// then restart the local gateway so the repaired configuration is verified.
+/// Keep interactive repair in a real terminal; verify only after Doctor completes.
 #[command]
-pub async fn fix_openclaw_config() -> Result<DoctorFixResult, String> {
+pub async fn fix_openclaw_config(elevated: Option<bool>) -> Result<DoctorFixResult, String> {
+    let _guard = DoctorGuard::acquire()?;
+    #[cfg(not(windows))]
+    return Err("当前平台请在系统终端中运行 openclaw doctor --fix，然后重新运行诊断。".to_string());
+
+    #[cfg(windows)]
+    {
     let config_path = platform::get_config_file_path();
     let config_file = std::path::Path::new(&config_path);
     if !config_file.exists() {
@@ -204,27 +239,51 @@ pub async fn fix_openclaw_config() -> Result<DoctorFixResult, String> {
     ));
     std::fs::copy(config_file, &backup_path).map_err(|error| format!("备份 OpenClaw 配置失败: {}", error))?;
 
-    match shell::run_openclaw(&["doctor", "--fix"]) {
-        Ok(_) => match crate::commands::service::restart_service().await {
-            Ok(restart_message) => Ok(DoctorFixResult {
-                success: true,
-                message: "已修复 OpenClaw 配置并成功重启网关。".to_string(),
-                backup_path: Some(backup_path.display().to_string()),
-                restart_message: Some(restart_message),
-            }),
-            Err(error) => Ok(DoctorFixResult {
-                success: false,
-                message: format!("配置已修复，但网关重启失败: {}", error),
-                backup_path: Some(backup_path.display().to_string()),
-                restart_message: None,
-            }),
+    let (mut terminal, receipt, transcript) = shell::spawn_doctor_terminal(elevated.unwrap_or(false))?;
+    let completion = loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Ok(bytes) = std::fs::read(&receipt) {
+            // Windows PowerShell writes a UTF-8 BOM. A partial write is retried.
+            let bytes = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes);
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
+                    break (code == 0, value["message"].as_str().unwrap_or("").to_string());
+                }
+            }
+        }
+        if terminal.try_wait().map_err(|e| e.to_string())?.is_some() {
+            break (false, "修复终端已关闭，未收到有效的修复完成记录。".to_string());
+        }
+    };
+    let verification = if completion.0 {
+        tauri::async_runtime::spawn_blocking(|| shell::run_openclaw_logged(&["doctor", "--lint"]))
+            .await.map_err(|e| e.to_string())?
+    } else {
+        let details = shell::read_log_tail(&transcript, 0, 200).unwrap_or_default();
+        Err(format!("{}\n{}", completion.1, details))
+    };
+    let verification = verification.and_then(|output| {
+        if doctor_lint_passed(&output) { Ok(output) } else { Err(output) }
+    });
+    let status = crate::commands::service::get_service_status().await?;
+    Ok(DoctorFixResult {
+        success: verification.is_ok(),
+        message: match verification {
+            Ok(_) if status.running => "修复命令已完成，只读诊断通过，网关正在监听。".to_string(),
+            Ok(_) => "修复命令已完成，只读诊断通过；网关尚未运行，可返回首页启动。".to_string(),
+            Err(error) => {
+                let permission_hint = if error.contains("Access is denied")
+                    || error.contains("EPERM") {
+                    "\n存在 Windows 权限错误，请使用管理员修复终端。"
+                } else { "" };
+                format!("修复未完全完成。网关当前{}。{}\n{}\n日志：{}",
+                    if status.running { "正在监听" } else { "未监听" },
+                    permission_hint, error, transcript.display())
+            },
         },
-        Err(error) => Ok(DoctorFixResult {
-            success: false,
-            message: format!("OpenClaw 自动修复失败: {}", error),
-            backup_path: Some(backup_path.display().to_string()),
-            restart_message: None,
-        }),
+        backup_path: Some(backup_path.display().to_string()),
+        restart_message: None,
+    })
     }
 }
 

@@ -245,7 +245,7 @@
       "helpText": "从飞书开放平台获取凭证，Chat ID 可从群聊设置中获取",
       "pluginInstalled": "飞书插件已安装",
       "pluginNeeded": "需要安装飞书插件",
-      "pluginDesc": "飞书渠道需要先安装 @m1heng-clawd/feishu 插件才能使用。",
+      "pluginDesc": "飞书渠道需要先安装官方 @openclaw/feishu 插件才能使用。",
       "installPlugin": "一键安装插件",
       "installing": "安装中...",
       "refreshStatus": "刷新状态",

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { motion } from 'framer-motion';
 import { invoke } from '@tauri-apps/api/core';
@@ -9,6 +9,8 @@ import {
   Loader2,
   Stethoscope,
   Wrench,
+  Terminal,
+  Shield,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { testingLogger } from '../../lib/logger';
@@ -27,6 +29,44 @@ export function Testing() {
   const [loading, setLoading] = useState(false);
   const [fixing, setFixing] = useState(false);
   const [fixResult, setFixResult] = useState<DoctorFixResult | null>(null);
+  const [runtimeLogs, setRuntimeLogs] = useState<string[]>([]);
+  const logsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!loading && !fixing) return;
+    let disposed = false;
+    let pending = false;
+    const fetchLogs = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const lines = await invoke<string[]>('get_logs', { lines: 100 });
+        if (!disposed) setRuntimeLogs(lines);
+      } catch (error) {
+        testingLogger.error('读取运行日志失败', error);
+      } finally {
+        pending = false;
+      }
+    };
+    fetchLogs();
+    const timer = setInterval(fetchLogs, 1000);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, [loading, fixing]);
+
+  useEffect(() => {
+    if (logsRef.current) logsRef.current.scrollTop = logsRef.current.scrollHeight;
+  }, [runtimeLogs]);
+
+  const fetchFinalLogs = async () => {
+    try {
+      setRuntimeLogs(await invoke<string[]>('get_logs', { lines: 100 }));
+    } catch (error) {
+      testingLogger.error('读取运行日志失败', error);
+    }
+  };
 
   const runDiagnostics = async () => {
     testingLogger.action('运行系统诊断');
@@ -48,27 +88,31 @@ export function Testing() {
         suggestion: t('testing.checkInstallation'),
       }]);
     } finally {
+      await fetchFinalLogs();
       setLoading(false);
     }
   };
 
-  const fixConfiguration = async () => {
-    if (!window.confirm('将先备份 openclaw.json，再执行 OpenClaw 自动修复并重启网关。是否继续？')) return;
+  const fixConfiguration = async (elevated = false) => {
+    if (!window.confirm(elevated
+      ? '将备份配置并请求 Windows 管理员权限，执行 OpenClaw 修复。请在 UAC 提示中确认，并在终端中确认所需操作。是否继续？'
+      : '将备份 openclaw.json 并打开修复终端。OpenClaw 修复可能迁移数据库，请在终端中确认所需操作。是否继续？')) return;
 
     setFixing(true);
     setFixResult(null);
     try {
-      const result = await api.fixOpenclawConfig();
+      const result = await api.fixOpenclawConfig(elevated);
       setFixResult(result);
       await runDiagnostics();
     } catch (error) {
       setFixResult({
         success: false,
-        message: `自动修复失败: ${String(error)}`,
+        message: `修复终端操作失败: ${String(error)}`,
         backup_path: null,
         restart_message: null,
       });
     } finally {
+      await fetchFinalLogs();
       setFixing(false);
     }
   };
@@ -82,7 +126,7 @@ export function Testing() {
       <div className="max-w-4xl space-y-6">
         {/* 诊断测试 */}
         <div className="bg-surface-card rounded-2xl p-6 border border-edge">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-purple-500/20 flex items-center justify-center">
                 <Stethoscope size={20} className="text-purple-400" />
@@ -94,15 +138,24 @@ export function Testing() {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <button
-                onClick={fixConfiguration}
+                onClick={() => fixConfiguration()}
                 disabled={loading || fixing}
                 className="btn-secondary flex items-center gap-2"
-                title="备份配置后执行 openclaw doctor --fix，并重启网关"
+                title="打开可输入的终端执行 openclaw doctor --fix"
               >
                 {fixing ? <Loader2 size={16} className="animate-spin" /> : <Wrench size={16} />}
-                自动修复并重启
+                {fixing ? '修复进行中' : '打开修复终端'}
+              </button>
+              <button
+                onClick={() => fixConfiguration(true)}
+                disabled={loading || fixing}
+                className="btn-secondary flex items-center gap-2"
+                title="请求管理员权限修复计划任务及符号链接权限问题"
+              >
+                <Shield size={16} />
+                管理员修复
               </button>
               <button
                 onClick={runDiagnostics}
@@ -116,10 +169,23 @@ export function Testing() {
           </div>
 
           {fixResult && (
-            <div className={clsx('mb-4 p-3 rounded-lg text-sm', fixResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400')}>
-              <p>{fixResult.message}</p>
+            <div role="status" className={clsx('mb-4 p-3 rounded-lg text-sm', fixResult.success ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400')}>
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-sans">{fixResult.message}</pre>
               {fixResult.backup_path && <p className="mt-1 text-xs text-content-tertiary">配置备份：{fixResult.backup_path}</p>}
             </div>
+          )}
+
+          {(loading || fixing || runtimeLogs.length > 0) && (
+            <section className="mb-4 border-t border-edge pt-3">
+              <div className="flex items-center gap-2 mb-2 text-sm text-content-secondary">
+                <Terminal size={16} />
+                <span>{fixing ? '自动修复日志' : loading ? '诊断日志' : '运行日志'}</span>
+                {(loading || fixing) && <Loader2 size={14} className="animate-spin" />}
+              </div>
+              <div ref={logsRef} className="h-64 overflow-auto bg-surface-sidebar p-3 font-mono text-xs">
+                <pre className="whitespace-pre-wrap break-all">{runtimeLogs.join('\n')}</pre>
+              </div>
+            </section>
           )}
 
           {/* 诊断结果统计 */}
